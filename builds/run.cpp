@@ -21,9 +21,14 @@
 #include <unordered_map>
 #include <vector>
 
-auto constexpr VEC_SIZE_W  = 32;
-auto constexpr VEC_SIZE_X  = 16;
-auto constexpr VEC_SIZE_Y  = 16;
+// W_PORTS: カーネルと一致させること
+auto constexpr W_PORTS     = 4;
+// ELEMENTS_BLOCK_W = BITWIDTH / GROUP_BITS = 128 / 8 = 16
+auto constexpr VEC_SIZE_W  = 16;
+// ELEMENTS_BLOCK_X = BITWIDTH / (sizeof(float)*8) = 128 / 32 = 4
+auto constexpr VEC_SIZE_X  = 4;
+// ELEMENTS_BLOCK_Y = BITWIDTH / (sizeof(float)*8) = 128 / 32 = 4
+auto constexpr VEC_SIZE_Y  = 4;
 auto constexpr GROUP_BITS  = 8;
 auto constexpr GROUP_SIZE  = 1 << GROUP_BITS;
 auto constexpr PACKED_BYTES = VEC_SIZE_W * GROUP_BITS / 8;
@@ -124,12 +129,34 @@ static void quantize_w(
         }
     }
 }
+static void split_packed_to_ports(
+    const std::vector<uint8_t>& flat,
+    int padded_n, int padded_d,
+    std::vector<uint8_t> port_bufs[W_PORTS]
+) {
+    int row_blocks    = padded_n / VEC_SIZE_W;
+    int bytes_per_row = row_blocks * PACKED_BYTES;
+    int rows_per_port = padded_d / W_PORTS;
+    size_t port_bytes = (size_t)rows_per_port * bytes_per_row;
+    for (int p = 0; p < W_PORTS; ++p) {
+        port_bufs[p].resize(port_bytes);
+        for (int ri = 0; ri < rows_per_port; ++ri) {
+            int r = ri * W_PORTS + p;  // 元行列の行インデックス
+            memcpy(port_bufs[p].data() + (size_t)ri * bytes_per_row,
+                   flat.data()         + (size_t)r  * bytes_per_row,
+                   bytes_per_row);
+        }
+    }
+}
 
 struct WQuantBo {
-    xrt::bo bo_w;
+    xrt::bo bo_w1, bo_w2, bo_w3, bo_w4;
     xrt::bo bo_cb;
     WQuantBo() = default;
-    WQuantBo(xrt::bo w, xrt::bo cb) : bo_w(std::move(w)), bo_cb(std::move(cb)) {}
+    WQuantBo(xrt::bo w1, xrt::bo w2, xrt::bo w3, xrt::bo w4, xrt::bo cb)
+        : bo_w1(std::move(w1)), bo_w2(std::move(w2)),
+          bo_w3(std::move(w3)), bo_w4(std::move(w4)),
+          bo_cb(std::move(cb)) {}
 };
 
 class MatMulAccelerator {
@@ -166,9 +193,11 @@ public:
         size_t x_sz = (size_t)padded_max_n * sizeof(float);
         size_t y_sz = (size_t)padded_max_d * sizeof(float);
 
-        bo_x = xrt::bo(device, x_sz, xrt::bo::flags::cacheable, krnl.group_id(2));
-        bo_y = xrt::bo(device, y_sz, xrt::bo::flags::cacheable, krnl.group_id(3));
+        bo_x = xrt::bo(device, x_sz, xrt::bo::flags::cacheable, krnl.group_id(5));
+        bo_y = xrt::bo(device, y_sz, xrt::bo::flags::cacheable, krnl.group_id(6));
         run  = xrt::run(krnl);
+        run.set_arg(5, bo_x);   // 固定 BO は一度だけ設定
+        run.set_arg(6, bo_y);
 
         bo_x_ptr = bo_x.map<float*>();
         bo_y_ptr = bo_y.map<float*>();
@@ -196,18 +225,35 @@ public:
             quantize_w(w, n, d, padded_n, padded_d, packed, codebook);
         }
 
-        size_t w_bytes  = packed.size();
         size_t cb_bytes = (size_t)GROUP_SIZE * sizeof(float);
 
-        xrt::bo bo_w(device, w_bytes, krnl.group_id(0));
-        bo_w.write(packed.data(), w_bytes, 0);
-        bo_w.sync(XCL_BO_SYNC_BO_TO_DEVICE, w_bytes, 0);
+        // flat パックを 4 ポートに分割
+        std::vector<uint8_t> port_bufs[W_PORTS];
+        split_packed_to_ports(packed, padded_n, padded_d, port_bufs);
+        size_t port_bytes = port_bufs[0].size();
 
-        xrt::bo bo_cb(device, cb_bytes, krnl.group_id(1));
+        xrt::bo bo_w1(device, port_bytes, krnl.group_id(0));
+        xrt::bo bo_w2(device, port_bytes, krnl.group_id(1));
+        xrt::bo bo_w3(device, port_bytes, krnl.group_id(2));
+        xrt::bo bo_w4(device, port_bytes, krnl.group_id(3));
+        xrt::bo bo_cb (device, cb_bytes,  krnl.group_id(4));
+
+        bo_w1.write(port_bufs[0].data(), port_bytes, 0);
+        bo_w2.write(port_bufs[1].data(), port_bytes, 0);
+        bo_w3.write(port_bufs[2].data(), port_bytes, 0);
+        bo_w4.write(port_bufs[3].data(), port_bytes, 0);
         bo_cb.write(codebook.data(), cb_bytes, 0);
+
+        bo_w1.sync(XCL_BO_SYNC_BO_TO_DEVICE, port_bytes, 0);
+        bo_w2.sync(XCL_BO_SYNC_BO_TO_DEVICE, port_bytes, 0);
+        bo_w3.sync(XCL_BO_SYNC_BO_TO_DEVICE, port_bytes, 0);
+        bo_w4.sync(XCL_BO_SYNC_BO_TO_DEVICE, port_bytes, 0);
         bo_cb.sync(XCL_BO_SYNC_BO_TO_DEVICE, cb_bytes, 0);
 
-        w_bo_cache.emplace(w, WQuantBo(std::move(bo_w), std::move(bo_cb)));
+        w_bo_cache.emplace(w, WQuantBo(
+            std::move(bo_w1), std::move(bo_w2),
+            std::move(bo_w3), std::move(bo_w4),
+            std::move(bo_cb)));
     }
 
     void start_task(const float* w, const float* x, int n, int d,
@@ -233,12 +279,13 @@ public:
             bo_x.sync(XCL_BO_SYNC_BO_TO_DEVICE, x_bytes, 0);
         }
 
-        run.set_arg(0, it->second.bo_w);
-        run.set_arg(1, it->second.bo_cb);
-        run.set_arg(2, bo_x);
-        run.set_arg(3, bo_y);
-        run.set_arg(4, padded_n);
-        run.set_arg(5, padded_d);
+        run.set_arg(0, it->second.bo_w1);
+        run.set_arg(1, it->second.bo_w2);
+        run.set_arg(2, it->second.bo_w3);
+        run.set_arg(3, it->second.bo_w4);
+        run.set_arg(4, it->second.bo_cb);
+        run.set_arg(7, padded_n);
+        run.set_arg(8, padded_d);
 
         run.start();
         t_start = std::chrono::high_resolution_clock::now();
@@ -763,7 +810,7 @@ float *forward(Transformer *transformer, int token, int pos) {
 
     matmul_async_start(0, w->w1 + l * dim * hidden_dim, s->xb, dim, hidden_dim);
     matmul_async_wait(0, s->hb, hidden_dim);
-    matmul_async_start(0, w->w3 + l * dim * hidden_dim, s->xb, dim, hidden_dim);
+    matmul_async_start(0, w->w3 + l * dim * hidden_dim, s->xb, dim, hidden_dim, true);
     matmul_async_wait(0, s->hb2, hidden_dim);
 
     for (int i = 0; i < hidden_dim; i++) {

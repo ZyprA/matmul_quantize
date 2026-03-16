@@ -1,0 +1,117 @@
+重み行列ポートを4つにした場合の結果．
+かなり高速化した
+
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 150
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a little girl named Lily. She loved to play outside and explore the world around her. One day, she saw a big, bright light in the sky. It made her giggle and shouted, "Wow, that's so cool!"
+Her mom noticed her curiosity and said, "That's a comet, Lily. It's a special kind of rock called a comet. It's very special because it's a powerful light that glows in the dark. We have to be careful not to touch it and learn about it."
+Lily was fascinated and wanted to learn more about the comet. Her mom taught her all about it
+achieved tok/s: 45.649510
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=6450  total=595.95 ms  avg=0.0924 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 150
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a little boy named Timmy. Timmy loved to play in the water. He would splash and jump in the big blue tub. One day, Timmy's mommy put on her favorite blouse and went to the pool. She didn't want to go because she didn't want to hurt Timmy's feelings. Timmy sat down and watched her. 
+Suddenly, Timmy's mommy started to run around the room and she couldn't stop running. Timmy watched her run and giggled. He realized that his mommy was running really fast. Timmy wanted to run too, but he was scared. He tried to be
+achieved tok/s: 46.130031
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=6450  total=584.98 ms  avg=0.0907 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 180
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a little girl named Lily. She loved to go on adventures with her mommy and daddy. One day, they decided to go on a picnic. Lily's mommy packed a basket full of yummy treats like sandwiches, fruit, and cookies. 
+As they were driving, Lily noticed that the fuel was running low. "Mommy, can we go slow?" she asked. Her mommy smiled and said, "Sure, we can go slow down." 
+After they finished their picnic, they continued driving. Lily was so excited to see all the trees and flowers. When they arrived, they sat down and started to eat their sandwiches. "Yum, this sandwich is so good!" said Lily. 
+As they finished their picnic,
+achieved tok/s: 42.407013
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=7740  total=726.92 ms  avg=0.0939 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 180
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a little girl named Lily. She loved to go to the park with her mom and dad. One day, they went to the park and saw a big yellow fountain. 
+Lily asked her mom, "What is that big yellow thing in the fountain?" 
+Her mom said, "That's a fountain, sweetie. It's where water comes out of it." 
+Lily thought it was funny and started to count the water flowing. Suddenly, she saw a little bird flying towards the fountain. She wanted to count the water too, so she grabbed a stick and tried to write her name on the fountain. 
+The bird watched as Lily wrote her name and followed the instructions. They had so much fun together! When it
+achieved tok/s: 42.407013
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=7740  total=720.89 ms  avg=0.0931 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 150
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a little girl named Lily. She loved to play with her toys, especially her purple doll. One day, Lily went to the park to play with her friends. She brought her doll with her, but her friend wanted to play with it too. Lily did not want to share her doll because she loved it so much.
+Her friend's mom saw what was happening and suggested that Lily should share her doll with her friend. Lily didn't want to at first, but then she realized that sharing is a nice thing to do. So, she took the doll and shared it with her friend.
+Lily's friend was so happy and grateful that Lily
+achieved tok/s: 45.817958
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=6450  total=616.40 ms  avg=0.0956 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 150
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a man who lived in a house near a big river. He had a special raft that he loved to play on. One day, he invited his friends over to his house to play with the raft. They were having so much fun until they started to fight over who could play on the raft. 
+The man didn't like fighting, so he decided to separate the two toys. He put one toy on the raft and the other toy on the raft. The friends stopped fighting and went back to playing with their own toys. 
+The man realized that it was much more fun to share and play together than to fight over the raft. From that
+achieved tok/s: 45.832052
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=6450  total=603.12 ms  avg=0.0935 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 150
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a little boy named Tim. Tim loved to play outside. One day, Tim found a new faucet in his yard. He wanted to play with it.
+Tim turned the faucet on and water came out. He was so happy. But then, something unexpected happened. Instead of water coming out of the faucet, a big, friendly dog appeared.
+The dog was very persistent. It liked water. Tim and the dog became best friends. They played in the yard with the faucet all day. And they lived happily ever after.
+achieved tok/s: 50.471892
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=5332  total=455.00 ms  avg=0.0853 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 150
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a little boy named Timmy. Timmy loved to play outside in the park. One day, he saw a tall tower in the distance. He wanted to go see it, so he ran towards it.
+As he got closer, he saw a kind man standing at the entrance. The man had a whistle in his hand. "I'm lost," the man said. "Can you help me find my way back home?"
+Timmy nodded his head and said, "Sure, I can whistle to help you find your way." The man took Timmy's hand and they walked together. After a few minutes, they found the way back home.
+Tim
+achieved tok/s: 45.719546
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=6450  total=621.19 ms  avg=0.0963 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 150
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+One day, a little girl named Sue found a pair of scissors. She wanted to play with them. Sue took them outside to her tidy yard. She saw a big tree and thought it would be fun to cut the tree with the scissors.
+Sue went to her friend Tom and said, "Look what I have! Let's cut the tree!" Tom looked at the tree and said, "No, Sue! You should not cut things without asking. It's not nice."
+Sue felt sad and went back home. She told her mom what happened. Her mom said, "Sue, it's good that you told Tom. If you cut things too well, it will make someone
+achieved tok/s: 46.016059
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=6450  total=596.88 ms  avg=0.0925 ms
+ubuntu@kria:~/apps/matmul_quantize$ ./run stories15M.bin -q stories15M_8bit_kmeans_quant.bin -c stories15M_8bit_kmeans_codebook.bin -n 150
+Loaded pre-quantized weights: stories15M_8bit_kmeans_quant.bin, stories15M_8bit_kmeans_codebook.bin
+Preloading transformer weights to FPGA...
+Weight preload complete.
+Once upon a time, there was a little boy named Timmy. Timmy loved to eat apples and bananas, but he hated peanut butter. One day, his mom gave him a funny peanut butter that made him sneeze. 
+"Ew, this peanut is silly!" Timmy said, giggling.
+"It's okay, Timmy. Sometimes things can make us sneeze," his mom replied.
+But Timmy didn't listen. He kept eating peanuts and forgot about the silly peanut in the jar. Later that day, his mom reminded him again to put the peanut back in
+achieved tok/s: 46.244569
+
+[FPGA] ---- kernel execution stats ----
+[FPGA] matmul_quantize_kernel[0]           calls=6450  total=575.60 ms  avg=0.0892 ms

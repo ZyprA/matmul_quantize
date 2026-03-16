@@ -11,8 +11,8 @@ constexpr int ceil_log2_const(int value, int bits = 0) {
 auto constexpr ROW_BLOCKS_BITS = ceil_log2_const(MAX_N / ELEMENTS_BLOCK_W);
 auto constexpr BLOCKS_X_BITS = ceil_log2_const(MAX_N / ELEMENTS_BLOCK_X);
 auto constexpr BLOCKS_Y_BITS = ceil_log2_const(MAX_D / ELEMENTS_BLOCK_Y);
-auto constexpr BLOCKS_W_BITS = ceil_log2_const(MAX_N * MAX_D / ELEMENTS_BLOCK_W);
-auto constexpr ROWS_BITS = ceil_log2_const(MAX_D);
+auto constexpr BLOCKS_W_BITS = ceil_log2_const(MAX_N * MAX_D / (ELEMENTS_BLOCK_W*W_PORTS));
+auto constexpr ROWS_BITS = ceil_log2_const(MAX_D / W_PORTS);
 
 static void load_x(
     const BLOCK_X_IO* input_x_io_block,
@@ -38,7 +38,7 @@ static void load_cb(
     for (int i = 0; i < GROUP_SIZE; i++) {
         #pragma HLS PIPELINE II=1
         W_INTERNAL_TYPE val = (W_INTERNAL_TYPE)input_cb[i];
-        for (int j = 0; j < ELEMENTS_BLOCK_W; j++) {
+        for (int j = 0; j < ELEMENTS_BLOCK_W * W_PORTS; j++) {
             #pragma HLS UNROLL
             cache_cb[j][i] = val;
         }
@@ -71,15 +71,17 @@ static void dequantize_w(
     hls::stream<BLOCK_W_QUANTIZED>& stream_w_idx,
     const W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W][GROUP_SIZE],
     hls::stream<BLOCK_W_INTERNAL>& stream_w_internal,
-    ap_uint<BLOCKS_W_BITS> blocks_w
+    ap_uint<BLOCKS_W_BITS> blocks_w,
+    const int w_port
 ) {
+    const int offset = w_port * ELEMENTS_BLOCK_W;
     for (int i = 0; i < blocks_w; i++) {
         #pragma HLS PIPELINE II=1
         BLOCK_W_QUANTIZED idx = stream_w_idx.read();
         BLOCK_W_INTERNAL w;
         for (int j = 0; j < ELEMENTS_BLOCK_W; j++) {
             #pragma HLS UNROLL
-            w[j] = cache_cb[j][idx[j]];
+            w[j] = cache_cb[j + offset][idx[j]];
         }
         stream_w_internal << w;
     }
@@ -118,15 +120,18 @@ static void calculate_wx(
 }
 
 static void write_y(
-    hls::stream<Y_IO_TYPE>& stream_y_io,
+    hls::stream<Y_IO_TYPE> stream_y_io[W_PORTS],
     BLOCK_Y_IO* output_y_io_block,
     ap_uint<BLOCKS_Y_BITS> blocks_y
 ) {
     for (int i = 0; i < blocks_y; i++) {
         BLOCK_Y_IO y_io_block;
-        for (int j = 0; j < ELEMENTS_BLOCK_Y; j++) {
+        for (int j = 0; j < ELEMENTS_BLOCK_Y / W_PORTS; j++) {
             #pragma HLS PIPELINE II=1
-            y_io_block[j] = (float)stream_y_io.read(); 
+            for (int p = 0; p < W_PORTS; p++) {
+                #pragma HLS UNROLL
+                y_io_block[j * W_PORTS + p] = stream_y_io[p].read();
+            }
         }
         output_y_io_block[i] = y_io_block;
     }
@@ -134,53 +139,67 @@ static void write_y(
 
 extern "C" {
     void matmul_quantize_kernel(
-        const BLOCK_W_PACKED*        input_w_io_block,
+        const BLOCK_W_PACKED*        input_w1_io_block,
+        const BLOCK_W_PACKED*        input_w2_io_block,
+        const BLOCK_W_PACKED*        input_w3_io_block,
+        const BLOCK_W_PACKED*        input_w4_io_block,
         const W_DEQUANTIZED_TYPE*    input_cb,
         const BLOCK_X_IO*            input_x_io_block,
         BLOCK_Y_IO*                  output_y_io_block,
         int n,
         int d
     ) {
-        #pragma HLS INTERFACE m_axi port=input_w_io_block  bundle=gmem0 depth=AXI_W_DEPTH  max_read_burst_length=BURST_READ_W
-        #pragma HLS INTERFACE m_axi port=input_cb          bundle=gmem1 depth=AXI_CB_DEPTH max_read_burst_length=BURST_READ_CB
-        #pragma HLS INTERFACE m_axi port=input_x_io_block  bundle=gmem2 depth=AXI_X_DEPTH  max_read_burst_length=BURST_READ_X
-        #pragma HLS INTERFACE m_axi port=output_y_io_block bundle=gmem3 depth=AXI_Y_DEPTH  max_write_burst_length=BURST_WRITE_Y
+        #pragma HLS INTERFACE m_axi port=input_w1_io_block  bundle=gmem0 depth=AXI_W_DEPTH  max_read_burst_length=BURST_READ_W
+        #pragma HLS INTERFACE m_axi port=input_w2_io_block  bundle=gmem1 depth=AXI_W_DEPTH  max_read_burst_length=BURST_READ_W
+        #pragma HLS INTERFACE m_axi port=input_w3_io_block  bundle=gmem2 depth=AXI_W_DEPTH  max_read_burst_length=BURST_READ_W
+        #pragma HLS INTERFACE m_axi port=input_w4_io_block  bundle=gmem3 depth=AXI_W_DEPTH  max_read_burst_length=BURST_READ_W
+        #pragma HLS INTERFACE m_axi port=input_cb          bundle=gmem4 depth=AXI_CB_DEPTH max_read_burst_length=BURST_READ_CB
+        #pragma HLS INTERFACE m_axi port=input_x_io_block  bundle=gmem5 depth=AXI_X_DEPTH  max_read_burst_length=BURST_READ_X
+        #pragma HLS INTERFACE m_axi port=output_y_io_block bundle=gmem5 depth=AXI_Y_DEPTH  max_write_burst_length=BURST_WRITE_Y
         #pragma HLS INTERFACE s_axilite port=n      bundle=control
         #pragma HLS INTERFACE s_axilite port=d      bundle=control
         #pragma HLS INTERFACE s_axilite port=return bundle=control
 
         BLOCK_X_INTERNAL cache_x[MAX_N / ELEMENTS_BLOCK_X];
-        #pragma HLS BIND_STORAGE variable=cache_x type=ram_1p impl=lutram
+        #pragma HLS BIND_STORAGE variable=cache_x type=ram_1wnr impl=lutram
         #pragma HLS ARRAY_PARTITION variable=cache_x cyclic factor=NUM_INST_X
 
-        W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W][GROUP_SIZE];
-        
+        W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W * W_PORTS][GROUP_SIZE];
         #pragma HLS ARRAY_PARTITION variable=cache_cb dim=1 complete
         #pragma HLS BIND_STORAGE variable=cache_cb type=ram_1p impl=lutram
 
 
-        hls::stream<BLOCK_W_INTERNAL> stream_w_internal;
+        hls::stream<BLOCK_W_INTERNAL> stream_w_internal[W_PORTS];
         #pragma HLS STREAM variable=stream_w_internal depth=4
 
-        hls::stream<BLOCK_W_QUANTIZED> stream_w_idx;
+        hls::stream<BLOCK_W_QUANTIZED> stream_w_idx[W_PORTS];
 #pragma HLS STREAM variable=stream_w_idx depth=4
 
-        hls::stream<Y_IO_TYPE> stream_y_io;
+        hls::stream<Y_IO_TYPE> stream_y_io[W_PORTS];
         #pragma HLS STREAM variable=stream_y_io depth=4
 
         #pragma HLS DATAFLOW
 
         ap_uint<BLOCKS_X_BITS> blocks_x = n / ELEMENTS_BLOCK_X;
         ap_uint<ROW_BLOCKS_BITS> row_blocks = n / ELEMENTS_BLOCK_W;
-        ap_uint<BLOCKS_W_BITS> blocks_w = n * d / ELEMENTS_BLOCK_W;
-        ap_uint<ROWS_BITS> rows = d;
+        ap_uint<BLOCKS_W_BITS> blocks_w = n * d / (ELEMENTS_BLOCK_W * W_PORTS);
+        ap_uint<ROWS_BITS> rows = d / W_PORTS;
         ap_uint<BLOCKS_Y_BITS> blocks_y = d / ELEMENTS_BLOCK_Y;
 
         load_x(input_x_io_block, cache_x, blocks_x);
         load_cb(input_cb, cache_cb);
-        load_w_idx(input_w_io_block, stream_w_idx, blocks_w);
-        dequantize_w(stream_w_idx, cache_cb, stream_w_internal, blocks_w);
-        calculate_wx(stream_w_internal, cache_x, stream_y_io, row_blocks, rows);
+        load_w_idx(input_w1_io_block, stream_w_idx[0], blocks_w);
+        load_w_idx(input_w2_io_block, stream_w_idx[1], blocks_w);
+        load_w_idx(input_w3_io_block, stream_w_idx[2], blocks_w);
+        load_w_idx(input_w4_io_block, stream_w_idx[3], blocks_w);
+        dequantize_w(stream_w_idx[0], cache_cb, stream_w_internal[0], blocks_w, 0);
+        dequantize_w(stream_w_idx[1], cache_cb, stream_w_internal[1], blocks_w, 1);
+        dequantize_w(stream_w_idx[2], cache_cb, stream_w_internal[2], blocks_w, 2);
+        dequantize_w(stream_w_idx[3], cache_cb, stream_w_internal[3], blocks_w, 3);
+        calculate_wx(stream_w_internal[0], cache_x, stream_y_io[0], row_blocks, rows);
+        calculate_wx(stream_w_internal[1], cache_x, stream_y_io[1], row_blocks, rows);
+        calculate_wx(stream_w_internal[2], cache_x, stream_y_io[2], row_blocks, rows);
+        calculate_wx(stream_w_internal[3], cache_x, stream_y_io[3], row_blocks, rows);
         write_y(stream_y_io, output_y_io_block, blocks_y);
     }
 }

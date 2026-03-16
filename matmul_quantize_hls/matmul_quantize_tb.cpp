@@ -68,7 +68,7 @@ static void print_accuracy(const char* tag,
 }
 
 int main() {
-    const int n = TEST_N;  // 320
+    const int n = TEST_N;  // 384 (128*3)
     const int d = TEST_D;  // 640
 
     std::srand(42);
@@ -108,24 +108,43 @@ int main() {
     }
 
     // ── 5. カーネル入力バッファ構築 ───────────────────────
-    const int row_blocks = n / ELEMENTS_BLOCK_W;      // 320/64 = 5
-    const int blocks_w   = n * d / ELEMENTS_BLOCK_W;  // 320*640/64 = 3200
-    const int blocks_x   = n / ELEMENTS_BLOCK_X;      // 320/16 = 20
-    const int blocks_y   = d / ELEMENTS_BLOCK_Y;      // 640/16 = 40
+    //
+    //  ポートの行割り当て（インターリーブ）:
+    //    ポート p → 行 p, p+W_PORTS, p+2*W_PORTS, ...
+    //    例: W_PORTS=4, d=640 → 各ポート 160 行
+    //
+    //  出力も同じ順序で write_y がインターリーブして格納するため，
+    //  y_out[i][j] = y[i * ELEMENTS_BLOCK_Y + j] は変わらない．
+    //
+    const int row_blocks     = n / ELEMENTS_BLOCK_W;          // 384/16 = 24
+    const int rows_per_port  = d / W_PORTS;                    // 640/4  = 160
+    const int blocks_per_port= rows_per_port * row_blocks;     // 160*24 = 3840
+    const int blocks_x       = n / ELEMENTS_BLOCK_X;          // 384/4  = 96
+    const int blocks_y       = d / ELEMENTS_BLOCK_Y;          // 640/4  = 160
 
-    // ── W: 4bit インデックスを 256bit にパック ─────────────
-    //   行 r のブロック j → w_packed[r * row_blocks + j]
-    //   各ブロック内で要素 e を bits[e*4+3 : e*4] に格納（64要素×4bit=256bit）
-    std::vector<BLOCK_W_PACKED> w_packed(blocks_w);
-    for (int r = 0; r < d; ++r) {
-        for (int j = 0; j < row_blocks; ++j) {
-            BLOCK_W_PACKED packed = 0;
-            for (int e = 0; e < ELEMENTS_BLOCK_W; ++e) {
-                int idx = W_idx[r * n + j * ELEMENTS_BLOCK_W + e];
-                // e 番目の4bitフィールドに書き込む（カーネルのアンパックと対称）
-                packed.range(e * GROUP_BITS + GROUP_BITS - 1, e * GROUP_BITS) = idx;
+    // ── W: 4 ポート分に分割してパック ─────────────────────
+    //   各ポートのバッファ: rows_per_port 行 × row_blocks ブロック
+    //   ポート p の ri 行目 = 元行列の行 ri * W_PORTS + p
+    std::vector<BLOCK_W_PACKED> w_packed1(blocks_per_port);
+    std::vector<BLOCK_W_PACKED> w_packed2(blocks_per_port);
+    std::vector<BLOCK_W_PACKED> w_packed3(blocks_per_port);
+    std::vector<BLOCK_W_PACKED> w_packed4(blocks_per_port);
+
+    std::vector<BLOCK_W_PACKED>* w_ports[W_PORTS] = {
+        &w_packed1, &w_packed2, &w_packed3, &w_packed4
+    };
+
+    for (int p = 0; p < W_PORTS; ++p) {
+        for (int ri = 0; ri < rows_per_port; ++ri) {
+            const int r = ri * W_PORTS + p;  // 元の行インデックス
+            for (int j = 0; j < row_blocks; ++j) {
+                BLOCK_W_PACKED packed = 0;
+                for (int e = 0; e < ELEMENTS_BLOCK_W; ++e) {
+                    int idx = W_idx[r * n + j * ELEMENTS_BLOCK_W + e];
+                    packed.range(e * GROUP_BITS + GROUP_BITS - 1, e * GROUP_BITS) = idx;
+                }
+                (*w_ports[p])[ri * row_blocks + j] = packed;
             }
-            w_packed[r * row_blocks + j] = packed;
         }
     }
 
@@ -143,9 +162,18 @@ int main() {
 
     // ── 6. カーネル呼び出し ───────────────────────────────
     matmul_quantize_kernel(
-        w_packed.data(), cb.data(), x_in.data(), y_out.data(), n, d);
+        w_packed1.data(),
+        w_packed2.data(),
+        w_packed3.data(),
+        w_packed4.data(),
+        cb.data(),
+        x_in.data(),
+        y_out.data(),
+        n, d);
 
     // ── 7. 結果の収集 ─────────────────────────────────────
+    //  write_y のインターリーブ後, y_out[i][j] = y[i*ELEMENTS_BLOCK_Y + j]
+    //  なので単純に線形マッピングで OK
     std::vector<float> y_hw(d);
     for (int r = 0; r < d; ++r)
         y_hw[r] = static_cast<float>(y_out[r / ELEMENTS_BLOCK_Y][r % ELEMENTS_BLOCK_Y]);
@@ -153,9 +181,9 @@ int main() {
     // ── 8. 精度評価 ───────────────────────────────────────
     std::cout << "=== 精度評価 (n=" << n << ", d=" << d
               << ", GROUP_SIZE=" << GROUP_SIZE << ") ===\n\n";
-    print_accuracy("HW vs 量子化参照 (主評価)",       y_hw,       y_quant_ref);
+    print_accuracy("HW vs 量子化参照 (主評価)",           y_hw,       y_quant_ref);
     std::cout << "\n";
-    print_accuracy("HW vs float 参照 (全体精度)",     y_hw,       y_ref);
+    print_accuracy("HW vs float 参照 (全体精度)",         y_hw,       y_ref);
     std::cout << "\n";
     print_accuracy("量子化参照 vs float 参照 (量子化誤差)", y_quant_ref, y_ref);
     std::cout << "\n";
