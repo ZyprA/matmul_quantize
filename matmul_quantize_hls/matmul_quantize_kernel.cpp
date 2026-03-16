@@ -1,0 +1,186 @@
+#include "matmul_quantize_kernel.h"
+#include "hls_stream.h"
+#include <cmath>
+
+using BLOCK_XW = hls::vector<X_INTERNAL_TYPE, ELEMENTS_BLOCK_W>;
+
+constexpr int ceil_log2_const(int value, int bits = 0) {
+    return (value <= (1 << bits)) ? bits : ceil_log2_const(value, bits + 1);
+}
+
+auto constexpr ROW_BLOCKS_BITS = ceil_log2_const(MAX_N / ELEMENTS_BLOCK_W);
+auto constexpr BLOCKS_X_BITS = ceil_log2_const(MAX_N / ELEMENTS_BLOCK_X);
+auto constexpr BLOCKS_Y_BITS = ceil_log2_const(MAX_D / ELEMENTS_BLOCK_Y);
+auto constexpr BLOCKS_W_BITS = ceil_log2_const(MAX_N * MAX_D / ELEMENTS_BLOCK_W);
+auto constexpr ROWS_BITS = ceil_log2_const(MAX_D);
+
+static void load_x(
+    const BLOCK_X_IO* input_x_io_block,
+    BLOCK_X_INTERNAL* cache_x,
+    ap_uint<BLOCKS_X_BITS> blocks_x
+) {
+    for (int i = 0; i < blocks_x; i++) {
+        #pragma HLS PIPELINE II=1
+        BLOCK_X_IO x_io_block = input_x_io_block[i];
+        BLOCK_X_INTERNAL x_internal;
+        for (int j = 0; j < ELEMENTS_BLOCK_X; j++) {
+            #pragma HLS UNROLL
+            x_internal[j] = (X_INTERNAL_TYPE) x_io_block[j];
+        }
+        cache_x[i] = x_internal;
+    }
+}
+
+static void load_cb(
+    const W_DEQUANTIZED_TYPE* input_cb,
+    W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W][GROUP_SIZE]
+) {
+    for (int i = 0; i < GROUP_SIZE; i++) {
+        #pragma HLS PIPELINE II=1
+        W_INTERNAL_TYPE val = (W_INTERNAL_TYPE)input_cb[i];
+        for (int j = 0; j < ELEMENTS_BLOCK_W; j++) {
+            #pragma HLS UNROLL
+            cache_cb[j][i] = val;
+        }
+    }
+}
+
+
+// ロード及びCBでの変換を担う．リソースが多くなる可能性がある．工夫が必要かも
+// Stage 1: AXI読み出し + アンパック（128bit → 32×4bit）
+static void load_w_idx(
+    const BLOCK_W_PACKED*           input_w_io_block,
+    hls::stream<BLOCK_W_QUANTIZED>& stream_w_idx,
+    ap_uint<BLOCKS_W_BITS>          blocks_w
+) {
+    for (int i = 0; i < blocks_w; i++) {
+        #pragma HLS PIPELINE II=1
+        BLOCK_W_PACKED packed = input_w_io_block[i];
+        BLOCK_W_QUANTIZED idx;
+        for (int j = 0; j < ELEMENTS_BLOCK_W; j++) {
+            #pragma HLS UNROLL
+            // j 番目の4bit フィールドを取り出す
+            idx[j] = packed.range(j * GROUP_BITS + GROUP_BITS - 1, j * GROUP_BITS);
+        }
+        stream_w_idx << idx;
+    }
+}
+
+// Stage 2: インデックス → 代表値の変換（AXIレイテンシなし）
+static void dequantize_w(
+    hls::stream<BLOCK_W_QUANTIZED>& stream_w_idx,
+    const W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W][GROUP_SIZE],
+    hls::stream<BLOCK_W_INTERNAL>& stream_w_internal,
+    ap_uint<BLOCKS_W_BITS> blocks_w
+) {
+    for (int i = 0; i < blocks_w; i++) {
+        #pragma HLS PIPELINE II=1
+        BLOCK_W_QUANTIZED idx = stream_w_idx.read();
+        BLOCK_W_INTERNAL w;
+        for (int j = 0; j < ELEMENTS_BLOCK_W; j++) {
+            #pragma HLS UNROLL
+            w[j] = cache_cb[j][idx[j]];
+        }
+        stream_w_internal << w;
+    }
+}
+
+static void calculate_wx(
+    hls::stream<BLOCK_W_INTERNAL>& stream_w_internal,
+    BLOCK_X_INTERNAL* cache_x,
+    hls::stream<Y_IO_TYPE>& stream_y_io,
+    ap_uint<ROW_BLOCKS_BITS> row_blocks,
+    ap_uint<ROWS_BITS> rows
+) {
+    for (int i = 0; i < rows; i++) {
+        Y_INTERNAL_TYPE acc = 0;
+        for (int j = 0; j < row_blocks; j++) {
+            #pragma HLS PIPELINE II=1
+            BLOCK_W_INTERNAL w = stream_w_internal.read();
+            BLOCK_XW xw;
+            for (int k = 0; k < NUM_INST_X; k++) {
+                #pragma HLS UNROLL
+                BLOCK_X_INTERNAL x = cache_x[NUM_INST_X*j + k];
+                for (int l = 0; l < ELEMENTS_BLOCK_X; l++) {
+                    xw[k*ELEMENTS_BLOCK_X + l] = x[l];
+                }
+            }
+            for (int k = 0; k < ELEMENTS_BLOCK_W; k++) {
+                #pragma HLS UNROLL
+                Y_INTERNAL_TYPE mul = w[k] * xw[k];
+                acc += mul;
+            }
+            if (j == row_blocks - 1) { // 外ループに書くとloop_flattenされずに全体でII=1を達成できずに前のstream_xがFULLにならない
+                stream_y_io << (Y_IO_TYPE) acc;
+            }
+        }
+    }
+}
+
+static void write_y(
+    hls::stream<Y_IO_TYPE>& stream_y_io,
+    BLOCK_Y_IO* output_y_io_block,
+    ap_uint<BLOCKS_Y_BITS> blocks_y
+) {
+    for (int i = 0; i < blocks_y; i++) {
+        BLOCK_Y_IO y_io_block;
+        for (int j = 0; j < ELEMENTS_BLOCK_Y; j++) {
+            #pragma HLS PIPELINE II=1
+            y_io_block[j] = (float)stream_y_io.read(); 
+        }
+        output_y_io_block[i] = y_io_block;
+    }
+}
+
+extern "C" {
+    void matmul_quantize_kernel(
+        const BLOCK_W_PACKED*        input_w_io_block,
+        const W_DEQUANTIZED_TYPE*    input_cb,
+        const BLOCK_X_IO*            input_x_io_block,
+        BLOCK_Y_IO*                  output_y_io_block,
+        int n,
+        int d
+    ) {
+        #pragma HLS INTERFACE m_axi port=input_w_io_block  bundle=gmem0 depth=AXI_W_DEPTH  max_read_burst_length=BURST_READ_W
+        #pragma HLS INTERFACE m_axi port=input_cb          bundle=gmem1 depth=AXI_CB_DEPTH max_read_burst_length=BURST_READ_CB
+        #pragma HLS INTERFACE m_axi port=input_x_io_block  bundle=gmem2 depth=AXI_X_DEPTH  max_read_burst_length=BURST_READ_X
+        #pragma HLS INTERFACE m_axi port=output_y_io_block bundle=gmem3 depth=AXI_Y_DEPTH  max_write_burst_length=BURST_WRITE_Y
+        #pragma HLS INTERFACE s_axilite port=n      bundle=control
+        #pragma HLS INTERFACE s_axilite port=d      bundle=control
+        #pragma HLS INTERFACE s_axilite port=return bundle=control
+
+        BLOCK_X_INTERNAL cache_x[MAX_N / ELEMENTS_BLOCK_X];
+        #pragma HLS BIND_STORAGE variable=cache_x type=ram_1p impl=lutram
+        #pragma HLS ARRAY_PARTITION variable=cache_x cyclic factor=NUM_INST_X
+
+        W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W][GROUP_SIZE];
+        
+        #pragma HLS ARRAY_PARTITION variable=cache_cb dim=1 complete
+        #pragma HLS BIND_STORAGE variable=cache_cb type=ram_1p impl=lutram
+
+
+        hls::stream<BLOCK_W_INTERNAL> stream_w_internal;
+        #pragma HLS STREAM variable=stream_w_internal depth=4
+
+        hls::stream<BLOCK_W_QUANTIZED> stream_w_idx;
+#pragma HLS STREAM variable=stream_w_idx depth=4
+
+        hls::stream<Y_IO_TYPE> stream_y_io;
+        #pragma HLS STREAM variable=stream_y_io depth=4
+
+        #pragma HLS DATAFLOW
+
+        ap_uint<BLOCKS_X_BITS> blocks_x = n / ELEMENTS_BLOCK_X;
+        ap_uint<ROW_BLOCKS_BITS> row_blocks = n / ELEMENTS_BLOCK_W;
+        ap_uint<BLOCKS_W_BITS> blocks_w = n * d / ELEMENTS_BLOCK_W;
+        ap_uint<ROWS_BITS> rows = d;
+        ap_uint<BLOCKS_Y_BITS> blocks_y = d / ELEMENTS_BLOCK_Y;
+
+        load_x(input_x_io_block, cache_x, blocks_x);
+        load_cb(input_cb, cache_cb);
+        load_w_idx(input_w_io_block, stream_w_idx, blocks_w);
+        dequantize_w(stream_w_idx, cache_cb, stream_w_internal, blocks_w);
+        calculate_wx(stream_w_internal, cache_x, stream_y_io, row_blocks, rows);
+        write_y(stream_y_io, output_y_io_block, blocks_y);
+    }
+}
