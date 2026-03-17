@@ -46,8 +46,6 @@ static void load_cb(
 }
 
 
-// ロード及びCBでの変換を担う．リソースが多くなる可能性がある．工夫が必要かも
-// Stage 1: AXI読み出し + アンパック（128bit → 32×4bit）
 static void load_w_idx(
     const BLOCK_W_PACKED*           input_w_io_block,
     hls::stream<BLOCK_W_QUANTIZED>& stream_w_idx,
@@ -59,14 +57,12 @@ static void load_w_idx(
         BLOCK_W_QUANTIZED idx;
         for (int j = 0; j < ELEMENTS_BLOCK_W; j++) {
             #pragma HLS UNROLL
-            // j 番目の4bit フィールドを取り出す
             idx[j] = packed.range(j * GROUP_BITS + GROUP_BITS - 1, j * GROUP_BITS);
         }
         stream_w_idx << idx;
     }
 }
 
-// Stage 2: インデックス → 代表値の変換（AXIレイテンシなし）
 static void dequantize_w(
     hls::stream<BLOCK_W_QUANTIZED>& stream_w_idx,
     const W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W][GROUP_SIZE],
@@ -112,7 +108,7 @@ static void calculate_wx(
                 Y_INTERNAL_TYPE mul = w[k] * xw[k];
                 acc += mul;
             }
-            if (j == row_blocks - 1) { // 外ループに書くとloop_flattenされずに全体でII=1を達成できずに前のstream_xがFULLにならない
+            if (j == row_blocks - 1) { // 外ループに書くとloop_flattenされずに全体でII=1を達成できずに前のstream_xがFULLになる可能性がある
                 stream_y_io << (Y_IO_TYPE) acc;
             }
         }

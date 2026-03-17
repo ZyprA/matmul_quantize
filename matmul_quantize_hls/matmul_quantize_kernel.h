@@ -4,13 +4,6 @@
 #include <ap_float.h>
 #include "hls_vector.h"
 #include <cmath>
-
-template<typename T> constexpr
-T const& min(T const& a, T const& b) {
-  return a < b ? a : b;
-}
-
-
 /*
 Wの量子化と逆量子化の方針
 コードブロックをGROUP_SIZE分floatで受け取り内部キャッシュしておく．
@@ -40,10 +33,10 @@ auto constexpr ELEMENTS_BLOCK_W = BITWIDTH / GROUP_BITS;
 auto constexpr ELEMENTS_BLOCK_X = BITWIDTH / (sizeof(X_IO_TYPE) * 8);
 auto constexpr ELEMENTS_BLOCK_Y = BITWIDTH / (sizeof(Y_IO_TYPE) * 8);
 auto constexpr NUM_INST_X = ELEMENTS_BLOCK_W / ELEMENTS_BLOCK_X;
-auto constexpr BURST_READ_W = 4 * 1024 / (BITWIDTH / 8);
-auto constexpr BURST_READ_X = 4 * 1024 / (BITWIDTH / 8);
-auto constexpr BURST_READ_CB = 4 * 1024 / (BITWIDTH / 8);
-auto constexpr BURST_WRITE_Y = 4 * 1024 / (BITWIDTH / 8);
+auto constexpr BURST_READ_W = 2 * 1024 / (BITWIDTH / 8);
+auto constexpr BURST_READ_X = 2 * 1024 / (BITWIDTH / 8);
+auto constexpr BURST_READ_CB = GROUP_SIZE;
+auto constexpr BURST_WRITE_Y = 2 * 1024 / (BITWIDTH / 8);
 
 // ブロックの定義
 using BLOCK_W_INTERNAL = hls::vector<W_INTERNAL_TYPE, ELEMENTS_BLOCK_W>;
