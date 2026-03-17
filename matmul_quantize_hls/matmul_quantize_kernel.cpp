@@ -158,11 +158,11 @@ extern "C" {
 
         BLOCK_X_INTERNAL cache_x[MAX_N / ELEMENTS_BLOCK_X];
         #pragma HLS BIND_STORAGE variable=cache_x type=ram_1wnr impl=lutram
-        #pragma HLS ARRAY_PARTITION variable=cache_x cyclic factor=NUM_INST_X
+        #pragma HLS ARRAY_PARTITION variable=cache_x cyclic factor=NUM_INST_X 
 
         W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W * W_PORTS][GROUP_SIZE];
         #pragma HLS ARRAY_PARTITION variable=cache_cb dim=1 complete
-        #pragma HLS BIND_STORAGE variable=cache_cb type=ram_1p impl=lutram
+        #pragma HLS BIND_STORAGE variable=cache_cb type=ram_1p impl=lutram // type=1wnrにした場合HLSがうまいことバンク複製をしてくれなかった．明示的にバンクを作るように実施
 
 
         hls::stream<BLOCK_W_INTERNAL> stream_w_internal[W_PORTS];
