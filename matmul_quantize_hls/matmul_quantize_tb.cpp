@@ -6,9 +6,6 @@
 #include <limits>
 #include "matmul_quantize_kernel.h"
 
-// ─────────────────────────────────────────────────────────
-// スカラー量子化ユーティリティ
-// ─────────────────────────────────────────────────────────
 static void scalar_quantize(
     const std::vector<float>& src,
     const std::vector<float>& codebook,
@@ -30,9 +27,6 @@ static void scalar_quantize(
     }
 }
 
-// ─────────────────────────────────────────────────────────
-// 精度レポート出力
-// ─────────────────────────────────────────────────────────
 static void print_accuracy(const char* tag,
                             const std::vector<float>& hw,
                             const std::vector<float>& ref) {
@@ -68,18 +62,16 @@ static void print_accuracy(const char* tag,
 }
 
 int main() {
-    const int n = TEST_N;  // 384 (128*3)
-    const int d = TEST_D;  // 640
+    const int n = TEST_N;
+    const int d = TEST_D;
 
     std::srand(42);
 
-    // ── 1. 重み行列・入力ベクトル生成 ─────────────────────
     std::vector<float> W_float(d * n);
     std::vector<float> x_raw(n);
     for (float& v : W_float) v = (static_cast<float>(std::rand()) / RAND_MAX - 0.5f) * 2.0f;
     for (float& v : x_raw)   v = (static_cast<float>(std::rand()) / RAND_MAX - 0.5f) * 4.0f;
 
-    // ── 2. float 参照 matmul ───────────────────────────────
     std::vector<float> y_ref(d, 0.0f);
     for (int r = 0; r < d; ++r) {
         float sum = 0.0f;
@@ -87,7 +79,6 @@ int main() {
         y_ref[r] = sum;
     }
 
-    // ── 3. スカラー量子化 ──────────────────────────────────
     float w_min = *std::min_element(W_float.begin(), W_float.end());
     float w_max = *std::max_element(W_float.begin(), W_float.end());
 
@@ -99,7 +90,6 @@ int main() {
     std::vector<float> W_dequant;
     scalar_quantize(W_float, codebook, W_idx, W_dequant);
 
-    // ── 4. 量子化後の参照 matmul ──────────────────────────
     std::vector<float> y_quant_ref(d, 0.0f);
     for (int r = 0; r < d; ++r) {
         float sum = 0.0f;
@@ -107,24 +97,12 @@ int main() {
         y_quant_ref[r] = sum;
     }
 
-    // ── 5. カーネル入力バッファ構築 ───────────────────────
-    //
-    //  ポートの行割り当て（インターリーブ）:
-    //    ポート p → 行 p, p+W_PORTS, p+2*W_PORTS, ...
-    //    例: W_PORTS=4, d=640 → 各ポート 160 行
-    //
-    //  出力も同じ順序で write_y がインターリーブして格納するため，
-    //  y_out[i][j] = y[i * ELEMENTS_BLOCK_Y + j] は変わらない．
-    //
     const int row_blocks     = n / ELEMENTS_BLOCK_W;          // 384/16 = 24
     const int rows_per_port  = d / W_PORTS;                    // 640/4  = 160
     const int blocks_per_port= rows_per_port * row_blocks;     // 160*24 = 3840
     const int blocks_x       = n / ELEMENTS_BLOCK_X;          // 384/4  = 96
     const int blocks_y       = d / ELEMENTS_BLOCK_Y;          // 640/4  = 160
 
-    // ── W: 4 ポート分に分割してパック ─────────────────────
-    //   各ポートのバッファ: rows_per_port 行 × row_blocks ブロック
-    //   ポート p の ri 行目 = 元行列の行 ri * W_PORTS + p
     std::vector<BLOCK_W_PACKED> w_packed1(blocks_per_port);
     std::vector<BLOCK_W_PACKED> w_packed2(blocks_per_port);
     std::vector<BLOCK_W_PACKED> w_packed3(blocks_per_port);
@@ -136,7 +114,7 @@ int main() {
 
     for (int p = 0; p < W_PORTS; ++p) {
         for (int ri = 0; ri < rows_per_port; ++ri) {
-            const int r = ri * W_PORTS + p;  // 元の行インデックス
+            const int r = ri * W_PORTS + p; 
             for (int j = 0; j < row_blocks; ++j) {
                 BLOCK_W_PACKED packed = 0;
                 for (int e = 0; e < ELEMENTS_BLOCK_W; ++e) {
@@ -148,19 +126,15 @@ int main() {
         }
     }
 
-    // ── X ─────────────────────────────────────────────────
     std::vector<BLOCK_X_IO> x_in(blocks_x);
     for (int i = 0; i < n; ++i)
         x_in[i / ELEMENTS_BLOCK_X][i % ELEMENTS_BLOCK_X] = x_raw[i];
 
-    // ── コードブック ───────────────────────────────────────
     std::vector<W_DEQUANTIZED_TYPE> cb(GROUP_SIZE);
     for (int k = 0; k < GROUP_SIZE; ++k) cb[k] = codebook[k];
 
-    // ── 出力バッファ ───────────────────────────────────────
     std::vector<BLOCK_Y_IO> y_out(blocks_y);
 
-    // ── 6. カーネル呼び出し ───────────────────────────────
     matmul_quantize_kernel(
         w_packed1.data(),
         w_packed2.data(),
@@ -171,14 +145,10 @@ int main() {
         y_out.data(),
         n, d);
 
-    // ── 7. 結果の収集 ─────────────────────────────────────
-    //  write_y のインターリーブ後, y_out[i][j] = y[i*ELEMENTS_BLOCK_Y + j]
-    //  なので単純に線形マッピングで OK
     std::vector<float> y_hw(d);
     for (int r = 0; r < d; ++r)
         y_hw[r] = static_cast<float>(y_out[r / ELEMENTS_BLOCK_Y][r % ELEMENTS_BLOCK_Y]);
 
-    // ── 8. 精度評価 ───────────────────────────────────────
     std::cout << "=== 精度評価 (n=" << n << ", d=" << d
               << ", GROUP_SIZE=" << GROUP_SIZE << ") ===\n\n";
     print_accuracy("HW vs 量子化参照 (主評価)",           y_hw,       y_quant_ref);
@@ -188,7 +158,6 @@ int main() {
     print_accuracy("量子化参照 vs float 参照 (量子化誤差)", y_quant_ref, y_ref);
     std::cout << "\n";
 
-    // ── 9. 先頭 10 要素のデバッグ出力 ────────────────────
     std::cout << "=== 先頭 10 要素の比較 ===\n";
     std::cout << "  idx  |  hw_out  | quant_ref | float_ref\n";
     std::cout << "-------|----------|-----------|-----------\n";
@@ -197,7 +166,6 @@ int main() {
                r, y_hw[r], y_quant_ref[r], y_ref[r]);
     std::cout << "\n";
 
-    // ── 10. PASS/FAIL 判定 ────────────────────────────────
     double mse = 0.0;
     for (int r = 0; r < d; ++r) { double e = y_hw[r] - y_quant_ref[r]; mse += e*e; }
     double rmse = std::sqrt(mse / d);
