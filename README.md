@@ -1,6 +1,6 @@
 # llama2.cのFPGAカーネル実装
 
-[llama2.c](https://github.com/karpathy/llama2.c) の推論処理をFPGAにオフロードし、高速化を行うための実装です。
+[llama2.c](https://github.com/karpathy/llama2.c) の推論処理時のGEMVをFPGAにオフロードし、高速化を行うための実装です。
 
 ## 開発環境・ターゲット
 
