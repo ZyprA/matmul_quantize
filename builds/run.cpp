@@ -23,13 +23,13 @@
 
 // W_PORTS: カーネルと一致させること
 auto constexpr W_PORTS     = 4;
-// ELEMENTS_BLOCK_W = BITWIDTH / GROUP_BITS = 128 / 8 = 16
-auto constexpr VEC_SIZE_W  = 16;
+// ELEMENTS_BLOCK_W = BITWIDTH / GROUP_BITS = 128 / 4 = 32
+auto constexpr VEC_SIZE_W  = 32;
 // ELEMENTS_BLOCK_X = BITWIDTH / (sizeof(float)*8) = 128 / 32 = 4
 auto constexpr VEC_SIZE_X  = 4;
 // ELEMENTS_BLOCK_Y = BITWIDTH / (sizeof(float)*8) = 128 / 32 = 4
 auto constexpr VEC_SIZE_Y  = 4;
-auto constexpr GROUP_BITS  = 8;
+auto constexpr GROUP_BITS  = 4;
 auto constexpr GROUP_SIZE  = 1 << GROUP_BITS;
 auto constexpr PACKED_BYTES = VEC_SIZE_W * GROUP_BITS / 8;
 auto constexpr MAX_N = 1408;

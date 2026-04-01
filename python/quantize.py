@@ -35,44 +35,18 @@ def quantize_matrix_kmeans(matrix: np.ndarray, n_clusters: int) -> tuple[np.ndar
     return indices, codebook
 
 
-def quantize_matrix_nf4(matrix: np.ndarray, n_clusters: int) -> tuple[np.ndarray, np.ndarray]:
-    dtype = _idx_dtype(n_clusters)
-    flat  = matrix.flatten().astype(np.float64)
 
-    quantiles = np.linspace(1 / (2 * n_clusters), 1 - 1 / (2 * n_clusters), n_clusters)
-    codebook  = norm.ppf(quantiles)
-    abs_max   = np.max(np.abs(codebook))
-    codebook  = (codebook / abs_max).astype(np.float32)
-
-    scale = float(np.max(np.abs(flat))) or 1.0
-    flat_norm = (flat / scale).astype(np.float32)
-
-    indices = _assign(flat_norm, codebook, dtype).reshape(matrix.shape)
-    scaled_cb = (codebook * scale).astype(np.float32)
-
-    return indices, scaled_cb
-
-
-def quantize_matrix(matrix: np.ndarray, n_clusters: int, mode: str) -> tuple[np.ndarray, np.ndarray]:
-    if mode == "kmeans":
-        return quantize_matrix_kmeans(matrix, n_clusters)
-    elif mode == "nf4":
-        return quantize_matrix_nf4(matrix, n_clusters)
-    raise ValueError(f"未知のモード: {mode}")
-
-
-def run(bin_path: str, bits: int, mode: str):
+def run(bin_path: str, bits: int):
     n_clusters = 1 << bits
     idx_dtype  = np.uint8 if n_clusters <= 256 else np.uint16
 
     stem     = os.path.splitext(os.path.basename(bin_path))[0]
-    out_dir  = f"{stem}_{bits}bit_{mode}"
+    out_dir  = f"{stem}_{bits}bit"
     os.makedirs(out_dir, exist_ok=True)
-    out_quant = os.path.join(out_dir, f"{stem}_{bits}bit_{mode}_quant.bin")
-    out_cb    = os.path.join(out_dir, f"{stem}_{bits}bit_{mode}_codebook.bin")
+    out_quant = os.path.join(out_dir, f"{stem}_{bits}bit_quant.bin")
+    out_cb    = os.path.join(out_dir, f"{stem}_{bits}bit_codebook.bin")
 
     print(f"入力: {bin_path}")
-    print(f"モード: {mode}")
     print(f"クラスタ数: {n_clusters} ({bits} bit)")
     print(f"出力ディレクトリ: {out_dir}")
 
@@ -119,7 +93,7 @@ def run(bin_path: str, bits: int, mode: str):
     for layer in range(n_layers):
         for name, sz in sizes.items():
             mat = tensors[name][layer * sz : (layer + 1) * sz]
-            idx, cb = quantize_matrix(mat, n_clusters, mode)
+            idx, cb = quantize_matrix_kmeans(mat, n_clusters)
             q_indices[name].append(idx)
             q_codebook[name].append(cb)
         print(f"  Layer {layer + 1}/{n_layers} 完了  ({time.time() - t0:.1f}s)")
@@ -176,7 +150,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="llama2.c 重みのスカラー量子化")
     parser.add_argument("bin_path", help="モデルバイナリ (例: stories15M.bin)")
     parser.add_argument("bits", type=int, help="量子化ビット数")
-    parser.add_argument("--mode", choices=["kmeans", "nf4"], default="kmeans",
-                        help="量子化モード: kmeans (デフォルト) または nf4")
     args = parser.parse_args()
-    run(args.bin_path, args.bits, args.mode)
+    run(args.bin_path, args.bits)

@@ -10,7 +10,7 @@ Wの量子化と逆量子化の方針
 行列重みの値はuint8で受けとり，逆量子化してxと計算する
 */
 
-auto constexpr GROUP_BITS = 8; 
+auto constexpr GROUP_BITS = 4; 
 auto constexpr GROUP_SIZE = 1 << GROUP_BITS;
 
 // 外部と内部間および内部計算の型の定義
@@ -19,8 +19,8 @@ using W_INTERNAL_TYPE = ap_fixed<32, 5>; // -16~15まで表現する
 using W_QUANTIZED_TYPE = ap_uint<GROUP_BITS>;
 using W_DEQUANTIZED_TYPE = float;
 
-using X_INTERNAL_TYPE = ap_fixed<32,13>; // -4096 ~ 4095
-using Y_INTERNAL_TYPE = ap_fixed<48,18>;
+using X_INTERNAL_TYPE = ap_fixed<32,20>;
+using Y_INTERNAL_TYPE = ap_fixed<48,25>;
 using X_IO_TYPE = float;
 using Y_IO_TYPE = float;
 
