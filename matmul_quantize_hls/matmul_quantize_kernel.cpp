@@ -136,6 +136,8 @@ static void dequantize_w(
     
 }
 
+auto constexpr BANKS = 16;
+
 static void calculate_wx_unit(
     hls::stream<BLOCK_W_INTERNAL>& stream_w_internal,
     hls::stream<BLOCK_XW>& stream_xw,
@@ -143,19 +145,33 @@ static void calculate_wx_unit(
     ap_uint<ROW_BLOCKS_BITS> row_blocks,
     ap_uint<ROWS_BITS> rows
 ) {
+    Y_INTERNAL_TYPE acc[BANKS];
+    #pragma HLS dependence variable=acc inter true distance=BANKS
     for (int i = 0; i < rows; i++) {
-        Y_INTERNAL_TYPE acc = 0;
         for (int j = 0; j < row_blocks; j++) {
+            Y_INTERNAL_TYPE tmp_mul[ELEMENTS_BLOCK_W];
             #pragma HLS PIPELINE II=1
             BLOCK_W_INTERNAL w = stream_w_internal.read();
             BLOCK_XW xw = stream_xw.read();
             for (int k = 0; k < ELEMENTS_BLOCK_W; k++) {
                 #pragma HLS UNROLL
-                Y_INTERNAL_TYPE mul = w[k] * xw[k];
-                acc += mul;
+                tmp_mul[k] = w[k] * xw[k];
             }
+            Y_INTERNAL_TYPE tmp_sum = 0;
+            for (int k = 0; k < ELEMENTS_BLOCK_W; k++) {
+                #pragma HLS UNROLL
+                tmp_sum += tmp_mul[k];
+            }
+            Y_INTERNAL_TYPE prev_acc = (j < BANKS) ? (Y_INTERNAL_TYPE)0 : acc[j % BANKS];
+            Y_INTERNAL_TYPE current_acc = prev_acc + tmp_sum;
+            acc[j % BANKS] = current_acc;
             if (j == row_blocks - 1) { // 外ループに書くとloop_flattenされずに全体でII=1を達成できずに前のstream_xがFULLになる可能性がある
-                stream_y_io << (Y_IO_TYPE) acc;
+                Y_INTERNAL_TYPE sum = 0;
+                for (int k = 0; k < BANKS; k++) {
+                    #pragma HLS UNROLL
+                    sum += acc[k];
+                }
+                stream_y_io << (Y_IO_TYPE) sum;
             }
         }
     }
