@@ -145,23 +145,35 @@ static void calculate_wx_unit(
     ap_uint<ROW_BLOCKS_BITS> row_blocks,
     ap_uint<ROWS_BITS> rows
 ) {
-    Y_INTERNAL_TYPE acc[BANKS];
-    #pragma HLS dependence variable=acc inter true distance=BANKS
     for (int i = 0; i < rows; i++) {
+        Y_INTERNAL_TYPE acc[BANKS];
+        #pragma HLS ARRAY_PARTITION variable=acc complete
         for (int j = 0; j < row_blocks; j++) {
-            Y_INTERNAL_TYPE tmp_mul[ELEMENTS_BLOCK_W];
+            #pragma HLS DEPENDENCE variable=acc inter RAW distance=BANKS true
             #pragma HLS PIPELINE II=1
+            Y_INTERNAL_TYPE tmp_mul[ELEMENTS_BLOCK_W];
+            #pragma HLS array_partition variable=tmp_mul complete
             BLOCK_W_INTERNAL w = stream_w_internal.read();
             BLOCK_XW xw = stream_xw.read();
             for (int k = 0; k < ELEMENTS_BLOCK_W; k++) {
                 #pragma HLS UNROLL
                 tmp_mul[k] = w[k] * xw[k];
             }
-            Y_INTERNAL_TYPE tmp_sum = 0;
+            
+           Y_INTERNAL_TYPE tree[ELEMENTS_BLOCK_W];
+            #pragma HLS ARRAY_PARTITION variable=tree complete
             for (int k = 0; k < ELEMENTS_BLOCK_W; k++) {
                 #pragma HLS UNROLL
-                tmp_sum += tmp_mul[k];
+                tree[k] = tmp_mul[k];
             }
+            for (int stride = ELEMENTS_BLOCK_W / 2; stride >= 1; stride >>= 1) {
+                #pragma HLS UNROLL
+                for (int k = 0; k < stride; k++) {
+                    #pragma HLS UNROLL
+                    tree[k] = tree[k] + tree[k + stride];
+                }
+            }
+            Y_INTERNAL_TYPE tmp_sum = tree[0];
             Y_INTERNAL_TYPE prev_acc = (j < BANKS) ? (Y_INTERNAL_TYPE)0 : acc[j % BANKS];
             Y_INTERNAL_TYPE current_acc = prev_acc + tmp_sum;
             acc[j % BANKS] = current_acc;
@@ -169,7 +181,7 @@ static void calculate_wx_unit(
                 Y_INTERNAL_TYPE sum = 0;
                 for (int k = 0; k < BANKS; k++) {
                     #pragma HLS UNROLL
-                    sum += acc[k];
+                    if (k < j+1) sum += acc[k];
                 }
                 stream_y_io << (Y_IO_TYPE) sum;
             }
@@ -233,12 +245,12 @@ extern "C" {
         #pragma HLS INTERFACE s_axilite port=return bundle=control
 
         BLOCK_X_INTERNAL cache_x[MAX_N / ELEMENTS_BLOCK_X];
-        #pragma HLS BIND_STORAGE variable=cache_x type=ram_1p impl=lutram
+        #pragma HLS BIND_STORAGE variable=cache_x type=ram_1p impl=bram
         #pragma HLS ARRAY_PARTITION variable=cache_x cyclic factor=NUM_INST_X 
 
         W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W * W_PORTS][GROUP_SIZE];
         #pragma HLS ARRAY_PARTITION variable=cache_cb dim=1 complete
-        #pragma HLS BIND_STORAGE variable=cache_cb type=ram_1p impl=lutram // type=1wnrにした場合HLSがうまいことバンク複製をしてくれなかった．明示的にバンクを作るように実施
+        #pragma HLS BIND_STORAGE variable=cache_cb type=ram_1p impl=bram // type=1wnrにした場合HLSがうまいことバンク複製をしてくれなかった．明示的にバンクを作るように実施
 
 
         hls::stream<BLOCK_W_INTERNAL> stream_w_internal[W_PORTS];

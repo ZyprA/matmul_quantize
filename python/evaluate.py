@@ -147,16 +147,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="量子化精度の評価")
     parser.add_argument("bin_path", help="元モデルバイナリ (例: stories15M.bin)")
     parser.add_argument("bits", type=int, help="量子化ビット数")
-    parser.add_argument("--mode", choices=["kmeans", "nf4"], default="kmeans",
-                        help="量子化モード: kmeans (デフォルト) または nf4")
     parser.add_argument("--quant", default=None, help="量子化 bin の直接パス指定")
     parser.add_argument("--cb",    default=None, help="コードブック bin の直接パス指定")
     args = parser.parse_args()
 
     stem       = os.path.splitext(os.path.basename(args.bin_path))[0]
-    quant_dir  = f"{stem}_{args.bits}bit_{args.mode}"
-    quant_path = args.quant or os.path.join(quant_dir, f"{stem}_{args.bits}bit_{args.mode}_quant.bin")
-    cb_path    = args.cb    or os.path.join(quant_dir, f"{stem}_{args.bits}bit_{args.mode}_codebook.bin")
+    quant_dir  = f"{stem}_{args.bits}bit"
+    quant_path = args.quant or os.path.join(quant_dir, f"{stem}_{args.bits}bit_quant.bin")
+    cb_path    = args.cb    or os.path.join(quant_dir, f"{stem}_{args.bits}bit_codebook.bin")
 
     for p in [args.bin_path, quant_path, cb_path]:
         if not os.path.exists(p):
