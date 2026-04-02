@@ -4,29 +4,29 @@
 #include <ap_float.h>
 #include "hls_vector.h"
 #include <cmath>
+
 /*
-Wの量子化と逆量子化の方針
-コードブロックをGROUP_SIZE分floatで受け取り内部キャッシュしておく．
-行列重みの値はuint8で受けとり，逆量子化してxと計算する
+    matmul_quantize_kernelはGROUP_BITSビットコードブックベース量子化のみをサポートします．
+    ap_fixedによる内部計算は1サイクルを満たすためバンク別のアキュミュレータ実装を不要とします．
+    内部演算の精度を上げるにはap_fixedでの整数部とビット幅の指定を調整する必要があります．
+    内部演算を1サイクルで完了できない型定義で実装をする場合，calc-floatブランチのカーネルを使用する必要があります．
 */
 
 auto constexpr GROUP_BITS = 8; 
 auto constexpr GROUP_SIZE = 1 << GROUP_BITS;
 
-// 外部と内部間および内部計算の型の定義
-
-using W_INTERNAL_TYPE = ap_fixed<32, 5>; // -16~15まで表現する
+using W_INTERNAL_TYPE = ap_fixed<32, 5>;
 using W_QUANTIZED_TYPE = ap_uint<GROUP_BITS>;
 using W_DEQUANTIZED_TYPE = float;
 
-using X_INTERNAL_TYPE = ap_fixed<32,13>; // -4096 ~ 4095
+using X_INTERNAL_TYPE = ap_fixed<32,13>;
 using Y_INTERNAL_TYPE = ap_fixed<48,18>;
 using X_IO_TYPE = float;
 using Y_IO_TYPE = float;
 
 // 定数設定
-auto constexpr W_PORTS = 4; // 4行分連続して4つのポートから読み出す
-auto constexpr BITWIDTH = 128; // 128が最大（だと思う）
+auto constexpr W_PORTS = 4;
+auto constexpr BITWIDTH = 128;
 auto constexpr MAX_N = 1408; // 768: 15M or 1408: 15M or 42M
 auto constexpr MAX_D = 32000;
 auto constexpr ELEMENTS_BLOCK_W = BITWIDTH / GROUP_BITS;
