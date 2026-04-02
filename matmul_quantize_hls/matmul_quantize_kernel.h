@@ -4,13 +4,14 @@
 #include <ap_float.h>
 #include "hls_vector.h"
 #include <cmath>
+
 /*
-Wの量子化と逆量子化の方針
-コードブロックをGROUP_SIZE分floatで受け取り内部キャッシュしておく．
-行列重みの値はuint8で受けとり，逆量子化してxと計算する
+    matmul_quantize_kernelはGROUP_BITSビットコードブックベース量子化のみをサポートします．
+    floatによる内部計算は1サイクルを満たすためバンク別のアキュミュレータ実装を必要とします．
+    内部演算を1サイクルで完了できる型定義で実装をする場合，mainブランチのカーネルを推奨します
 */
 
-auto constexpr GROUP_BITS = 4; 
+auto constexpr GROUP_BITS = 8; 
 auto constexpr GROUP_SIZE = 1 << GROUP_BITS;
 
 // 外部と内部間および内部計算の型の定義
