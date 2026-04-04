@@ -23,15 +23,20 @@
 
 // W_PORTS: カーネルと一致させること
 auto constexpr W_PORTS     = 4;
-// ELEMENTS_BLOCK_W = BITWIDTH / GROUP_BITS = 128 / 4 = 32
+// ベクトル量子化パラメータ
+auto constexpr GROUP_BITS  = 8;
+auto constexpr GROUP_SIZE  = 1 << GROUP_BITS;  // 256
+auto constexpr VECTOR_DIM  = 2;
+// ELEMENTS_BLOCK_W = BITWIDTH / (GROUP_BITS / VECTOR_DIM) = 128 / 4 = 32
 auto constexpr VEC_SIZE_W  = 32;
 // ELEMENTS_BLOCK_X = BITWIDTH / (sizeof(float)*8) = 128 / 32 = 4
 auto constexpr VEC_SIZE_X  = 4;
 // ELEMENTS_BLOCK_Y = BITWIDTH / (sizeof(float)*8) = 128 / 32 = 4
 auto constexpr VEC_SIZE_Y  = 4;
-auto constexpr GROUP_BITS  = 4;
-auto constexpr GROUP_SIZE  = 1 << GROUP_BITS;
-auto constexpr PACKED_BYTES = VEC_SIZE_W * GROUP_BITS / 8;
+// PACKED_BYTES = ELEMENTS_BLOCK_W * GROUP_BITS / VECTOR_DIM / 8 = 32 * 8 / 2 / 8 = 16
+auto constexpr PACKED_BYTES = VEC_SIZE_W * GROUP_BITS / VECTOR_DIM / 8;
+// インデックス数 = ELEMENTS_BLOCK_W / VECTOR_DIM = 16
+auto constexpr NUM_INDICES = VEC_SIZE_W / VECTOR_DIM;
 auto constexpr MAX_N = 1408;
 auto constexpr MAX_D = 32000;
 
@@ -44,30 +49,21 @@ struct PreQuantData {
 
 static std::unordered_map<const float*, PreQuantData> g_prequant;
 
+// ベクトル量子化用: インデックスは既にVECTOR_DIM要素ごとに1つ
+// n_vec: 1行あたりの元のベクトル数 (= ceil(n / VECTOR_DIM))
 static std::vector<uint8_t> pack_indices_padded(
-    const uint8_t* indices, int n, int d, int padded_n, int padded_d
+    const uint8_t* indices, int n_vec, int d, int padded_n, int padded_d
 ) {
+    int padded_vec_per_row = padded_n / VECTOR_DIM;
     int row_blocks = padded_n / VEC_SIZE_W;
     std::vector<uint8_t> packed((size_t)padded_d * row_blocks * PACKED_BYTES, 0);
     for (int r = 0; r < d; ++r) {
         for (int j = 0; j < row_blocks; ++j) {
             uint8_t* blk = packed.data() + ((size_t)r * row_blocks + j) * PACKED_BYTES;
-            if constexpr (GROUP_BITS % 8 == 0) {
-                constexpr int BYTES_PER_IDX = GROUP_BITS / 8;
-                for (int e = 0; e < VEC_SIZE_W; ++e) {
-                    int c = j * VEC_SIZE_W + e;
-                    uint8_t idx_val = (c < n) ? indices[(size_t)r * n + c] : 0;
-                    blk[e * BYTES_PER_IDX] = idx_val;
-                }
-            } else {
-                for (int e = 0; e < VEC_SIZE_W; ++e) {
-                    int c = j * VEC_SIZE_W + e;
-                    uint8_t idx_val = (c < n) ? indices[(size_t)r * n + c] : 0;
-                    int bit_pos  = e * GROUP_BITS;
-                    int byte_idx = bit_pos / 8;
-                    int bit_off  = bit_pos % 8;
-                    blk[byte_idx] |= static_cast<uint8_t>(idx_val << bit_off);
-                }
+            for (int k = 0; k < NUM_INDICES; ++k) {
+                int vec_idx = j * NUM_INDICES + k;
+                uint8_t idx_val = (vec_idx < n_vec) ? indices[(size_t)r * n_vec + vec_idx] : 0;
+                blk[k] = idx_val;  // 8ビットインデックスをそのまま格納
             }
         }
     }
@@ -83,48 +79,66 @@ static void quantize_w(
     std::vector<uint8_t>& packed,
     std::vector<float>&   codebook
 ) {
-    float w_min =  std::numeric_limits<float>::max();
-    float w_max = -std::numeric_limits<float>::max();
-    for (int i = 0; i < d * n; ++i) {
-        w_min = std::min(w_min, w[i]);
-        w_max = std::max(w_max, w[i]);
+    // ベクトル量子化: VECTOR_DIM要素ごとに1つのインデックス
+    int n_vec = (n + VECTOR_DIM - 1) / VECTOR_DIM;  // 1行あたりのベクトル数
+    int row_blocks = padded_n / VEC_SIZE_W;
+
+    // 簡易ベクトル量子化: 各次元ごとにmin-max正規化して均等分割
+    // codebook: GROUP_SIZE個のVECTOR_DIM次元ベクトル
+    std::vector<float> w_min(VECTOR_DIM, std::numeric_limits<float>::max());
+    std::vector<float> w_max(VECTOR_DIM, -std::numeric_limits<float>::max());
+
+    for (int r = 0; r < d; ++r) {
+        for (int v = 0; v < n_vec; ++v) {
+            for (int dim = 0; dim < VECTOR_DIM; ++dim) {
+                int c = v * VECTOR_DIM + dim;
+                if (c < n) {
+                    float val = w[(size_t)r * n + c];
+                    w_min[dim] = std::min(w_min[dim], val);
+                    w_max[dim] = std::max(w_max[dim], val);
+                }
+            }
+        }
     }
 
-    codebook.resize(GROUP_SIZE);
-    for (int k = 0; k < GROUP_SIZE; ++k)
-        codebook[k] = w_min + (w_max - w_min) * (k + 0.5f) / GROUP_SIZE;
+    // VECTOR_DIM=2の場合、16x16グリッドで256クラスタを生成
+    int splits_per_dim = 1;
+    while (splits_per_dim * splits_per_dim < GROUP_SIZE) splits_per_dim++;
 
-    int row_blocks = padded_n / VEC_SIZE_W;
+    codebook.resize(GROUP_SIZE * VECTOR_DIM);
+    for (int k = 0; k < GROUP_SIZE; ++k) {
+        int idx0 = k % splits_per_dim;
+        int idx1 = k / splits_per_dim;
+        codebook[k * VECTOR_DIM + 0] = w_min[0] + (w_max[0] - w_min[0]) * (idx0 + 0.5f) / splits_per_dim;
+        codebook[k * VECTOR_DIM + 1] = w_min[1] + (w_max[1] - w_min[1]) * (idx1 + 0.5f) / splits_per_dim;
+    }
+
+    std::vector<float> step(VECTOR_DIM), inv_step(VECTOR_DIM);
+    for (int dim = 0; dim < VECTOR_DIM; ++dim) {
+        step[dim] = (w_max[dim] > w_min[dim]) ? (w_max[dim] - w_min[dim]) / splits_per_dim : 1.0f;
+        inv_step[dim] = 1.0f / step[dim];
+    }
+
     packed.assign((size_t)padded_d * row_blocks * PACKED_BYTES, 0);
-
-    float step = (w_max > w_min) ? (w_max - w_min) / GROUP_SIZE : 1.0f;
-    float inv_step = 1.0f / step;
 
     for (int r = 0; r < d; ++r) {
         for (int j = 0; j < row_blocks; ++j) {
             uint8_t* blk = packed.data() + ((size_t)r * row_blocks + j) * PACKED_BYTES;
-            if constexpr (GROUP_BITS % 8 == 0) {
-                constexpr int BYTES_PER_IDX = GROUP_BITS / 8;
-                for (int e = 0; e < VEC_SIZE_W; ++e) {
-                    int c = j * VEC_SIZE_W + e;
-                    float val = (c < n) ? w[(size_t)r * n + c] : 0.0f;
-                    int best = (int)((val - w_min) * inv_step);
-                    if (best < 0) best = 0;
-                    if (best >= GROUP_SIZE) best = GROUP_SIZE - 1;
-                    blk[e * BYTES_PER_IDX] = static_cast<uint8_t>(best);
-                }
-            } else {
-                for (int e = 0; e < VEC_SIZE_W; ++e) {
-                    int c = j * VEC_SIZE_W + e;
-                    float val = (c < n) ? w[(size_t)r * n + c] : 0.0f;
-                    int best = (int)((val - w_min) * inv_step);
-                    if (best < 0) best = 0;
-                    if (best >= GROUP_SIZE) best = GROUP_SIZE - 1;
-                    int bit_pos  = e * GROUP_BITS;
-                    int byte_idx = bit_pos / 8;
-                    int bit_off  = bit_pos % 8;
-                    blk[byte_idx] |= static_cast<uint8_t>(best << bit_off);
-                }
+            for (int k = 0; k < NUM_INDICES; ++k) {
+                int v_idx = j * NUM_INDICES + k;
+                int c0 = v_idx * VECTOR_DIM;
+                float val0 = (c0 < n) ? w[(size_t)r * n + c0] : 0.0f;
+                float val1 = (c0 + 1 < n) ? w[(size_t)r * n + c0 + 1] : 0.0f;
+
+                int q0 = (int)((val0 - w_min[0]) * inv_step[0]);
+                int q1 = (int)((val1 - w_min[1]) * inv_step[1]);
+                if (q0 < 0) q0 = 0;
+                if (q0 >= splits_per_dim) q0 = splits_per_dim - 1;
+                if (q1 < 0) q1 = 0;
+                if (q1 >= splits_per_dim) q1 = splits_per_dim - 1;
+
+                int best = q1 * splits_per_dim + q0;
+                blk[k] = static_cast<uint8_t>(best);
             }
         }
     }
@@ -225,7 +239,7 @@ public:
             quantize_w(w, n, d, padded_n, padded_d, packed, codebook);
         }
 
-        size_t cb_bytes = (size_t)GROUP_SIZE * sizeof(float);
+        size_t cb_bytes = (size_t)GROUP_SIZE * VECTOR_DIM * sizeof(float);
 
         // flat パックを 4 ポートに分割
         std::vector<uint8_t> port_bufs[W_PORTS];
@@ -576,6 +590,10 @@ static void load_quantized_weights(
     if (fread(&n_clusters_q, sizeof(int), 1, qf) != 1) {
         fprintf(stderr, "Failed to read quant n_clusters\n"); exit(EXIT_FAILURE);
     }
+    int vector_dim_q;
+    if (fread(&vector_dim_q, sizeof(int), 1, qf) != 1) {
+        fprintf(stderr, "Failed to read quant vector_dim\n"); exit(EXIT_FAILURE);
+    }
 
     Config ccfg;
     if (fread(&ccfg, sizeof(Config), 1, cf) != 1) {
@@ -585,10 +603,21 @@ static void load_quantized_weights(
     if (fread(&n_clusters_c, sizeof(int), 1, cf) != 1) {
         fprintf(stderr, "Failed to read codebook n_clusters\n"); exit(EXIT_FAILURE);
     }
+    int vector_dim_c;
+    if (fread(&vector_dim_c, sizeof(int), 1, cf) != 1) {
+        fprintf(stderr, "Failed to read codebook vector_dim\n"); exit(EXIT_FAILURE);
+    }
 
     if (n_clusters_q != GROUP_SIZE || n_clusters_c != GROUP_SIZE) {
         fprintf(stderr, "n_clusters mismatch: quant=%d, codebook=%d, kernel=%d\n",
                 n_clusters_q, n_clusters_c, GROUP_SIZE);
+        fclose(qf);
+        fclose(cf);
+        exit(EXIT_FAILURE);
+    }
+    if (vector_dim_q != VECTOR_DIM || vector_dim_c != VECTOR_DIM) {
+        fprintf(stderr, "vector_dim mismatch: quant=%d, codebook=%d, kernel=%d\n",
+                vector_dim_q, vector_dim_c, VECTOR_DIM);
         fclose(qf);
         fclose(cf);
         exit(EXIT_FAILURE);
@@ -620,18 +649,20 @@ static void load_quantized_weights(
         int n   = desc.n;
         int d   = desc.d;
         long long sz = (long long)n * d;
+        long long n_vec = (sz + VECTOR_DIM - 1) / VECTOR_DIM;  // ベクトル量子化後のインデックス数
+        size_t cb_size = GROUP_SIZE * VECTOR_DIM;
 
-        std::vector<std::vector<float>> layer_cbs(n_layers, std::vector<float>(GROUP_SIZE));
+        std::vector<std::vector<float>> layer_cbs(n_layers, std::vector<float>(cb_size));
         for (int l = 0; l < n_layers; ++l) {
-            if (fread(layer_cbs[l].data(), sizeof(float), GROUP_SIZE, cf) != (size_t)GROUP_SIZE) {
+            if (fread(layer_cbs[l].data(), sizeof(float), cb_size, cf) != cb_size) {
                 fprintf(stderr, "Failed to read codebook for weight %d layer %d\n", wi, l);
                 exit(EXIT_FAILURE);
             }
         }
 
-        std::vector<std::vector<uint8_t>> layer_indices(n_layers, std::vector<uint8_t>(sz));
+        std::vector<std::vector<uint8_t>> layer_indices(n_layers, std::vector<uint8_t>(n_vec));
         for (int l = 0; l < n_layers; ++l) {
-            if (fread(layer_indices[l].data(), sizeof(uint8_t), sz, qf) != (size_t)sz) {
+            if (fread(layer_indices[l].data(), sizeof(uint8_t), n_vec, qf) != (size_t)n_vec) {
                 fprintf(stderr, "Failed to read indices for weight %d layer %d\n", wi, l);
                 exit(EXIT_FAILURE);
             }
@@ -646,13 +677,14 @@ static void load_quantized_weights(
 
         int padded_n = ((n + VEC_SIZE_W - 1) / VEC_SIZE_W) * VEC_SIZE_W;
         int padded_d = ((d + VEC_SIZE_Y - 1) / VEC_SIZE_Y) * VEC_SIZE_Y;
+        int n_vec_per_row = (n + VECTOR_DIM - 1) / VECTOR_DIM;
 
         for (int l = 0; l < n_layers; ++l) {
             const float* key = desc.base + (long long)l * desc.layer_stride;
             PreQuantData pqd;
             pqd.padded_n = padded_n;
             pqd.padded_d = padded_d;
-            pqd.packed   = pack_indices_padded(layer_indices[l].data(), n, d, padded_n, padded_d);
+            pqd.packed   = pack_indices_padded(layer_indices[l].data(), n_vec_per_row, d, padded_n, padded_d);
             pqd.codebook = layer_cbs[l];
             g_prequant.emplace(key, std::move(pqd));
         }

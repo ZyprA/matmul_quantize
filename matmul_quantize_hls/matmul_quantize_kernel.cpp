@@ -58,29 +58,33 @@ static void broadcast_x(
 }
 
 static void load_cb(
-    const W_DEQUANTIZED_TYPE* input_cb,
-    W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W * W_PORTS][GROUP_SIZE]
+    const CB_IO_TYPE* input_cb,
+    CB_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS][GROUP_SIZE]
 ) {
     for (int i = 0; i < GROUP_SIZE; i++) {
         #pragma HLS PIPELINE II=1
-        W_INTERNAL_TYPE val = (W_INTERNAL_TYPE)input_cb[i];
-        for (int j = 0; j < ELEMENTS_BLOCK_W * W_PORTS; j++) {
+        CB_IO_TYPE cb_io = input_cb[i];
+        CB_INTERNAL_TYPE cb_internal;
+        for (int j = 0; j < VECTOR_DIM; j++) {
+            cb_internal[j] = (W_INTERNAL_TYPE) cb_io[j];
+        }
+        for (int j = 0; j < ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS; j++) {
             #pragma HLS UNROLL
-            cache_cb[j][i] = val;
+            cache_cb[j][i] = cb_internal;
         }
     }
 }
 
 static void load_w_idx_unit(
     const BLOCK_W_PACKED* input_w_io_block,
-    hls::stream<BLOCK_W_QUANTIZED>& stream_w_idx,
+    hls::stream<BLOCK_W_INDEX>& stream_w_idx,
     ap_uint<BLOCKS_W_BITS> blocks_w
 ) {
     for (int i = 0; i < blocks_w; i++) {
         #pragma HLS PIPELINE II=1
         BLOCK_W_PACKED packed = input_w_io_block[i];
-        BLOCK_W_QUANTIZED idx;
-        for (int j = 0; j < ELEMENTS_BLOCK_W; j++) {
+        BLOCK_W_INDEX idx;
+        for (int j = 0; j < ELEMENTS_BLOCK_W / VECTOR_DIM; j++) {
             #pragma HLS UNROLL
             idx[j] = packed.range(j * GROUP_BITS + GROUP_BITS - 1, j * GROUP_BITS);
         }
@@ -93,7 +97,7 @@ static void load_w_idx(
     const BLOCK_W_PACKED* input_w2_io_block,
     const BLOCK_W_PACKED* input_w3_io_block,
     const BLOCK_W_PACKED* input_w4_io_block,
-    hls::stream<BLOCK_W_QUANTIZED> stream_w_idx[W_PORTS],
+    hls::stream<BLOCK_W_INDEX> stream_w_idx[W_PORTS],
     ap_uint<BLOCKS_W_BITS> blocks_w
 ) {
     load_w_idx_unit(input_w1_io_block, stream_w_idx[0], blocks_w);
@@ -102,37 +106,41 @@ static void load_w_idx(
     load_w_idx_unit(input_w4_io_block, stream_w_idx[3], blocks_w);
 }
 
+template<int W_PORT>
 static void dequantize_w_unit(
-    hls::stream<BLOCK_W_QUANTIZED>& stream_w_idx,
-    const W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W * W_PORTS][GROUP_SIZE],
+    hls::stream<BLOCK_W_INDEX>& stream_w_idx,
+    const CB_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS][GROUP_SIZE],
     hls::stream<BLOCK_W_INTERNAL>& stream_w_internal,
-    ap_uint<BLOCKS_W_BITS> blocks_w,
-    const int w_port
+    ap_uint<BLOCKS_W_BITS> blocks_w
 ) {
-    const int offset = w_port * ELEMENTS_BLOCK_W;
+    const int offset = W_PORT * ELEMENTS_BLOCK_W/VECTOR_DIM;
     for (int i = 0; i < blocks_w; i++) {
         #pragma HLS PIPELINE II=1
-        BLOCK_W_QUANTIZED idx = stream_w_idx.read();
+        BLOCK_W_INDEX idx = stream_w_idx.read();
         BLOCK_W_INTERNAL w;
-        for (int j = 0; j < ELEMENTS_BLOCK_W; j++) {
+        for (int j = 0; j < ELEMENTS_BLOCK_W/VECTOR_DIM; j++) {
             #pragma HLS UNROLL
-            w[j] = cache_cb[j + offset][idx[j]];
+            CB_INTERNAL_TYPE cb_value = cache_cb[j + offset][idx[j]];
+            for (int k = 0; k < VECTOR_DIM; k++) {
+                #pragma HLS UNROLL
+                w[VECTOR_DIM*j+k] = cb_value[k];
+            }
         }
         stream_w_internal << w;
     }
 }
 
 static void dequantize_w(
-    hls::stream<BLOCK_W_QUANTIZED> stream_w_idx[W_PORTS],
-    const W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W * W_PORTS][GROUP_SIZE],
+    hls::stream<BLOCK_W_INDEX> stream_w_idx[W_PORTS],
+    const CB_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS][GROUP_SIZE],
     hls::stream<BLOCK_W_INTERNAL> stream_w_internal[W_PORTS],
     ap_uint<BLOCKS_W_BITS> blocks_w
 ) {
     #pragma HLS DATAFLOW
-    dequantize_w_unit(stream_w_idx[0], cache_cb, stream_w_internal[0], blocks_w, 0);
-    dequantize_w_unit(stream_w_idx[1], cache_cb, stream_w_internal[1], blocks_w, 1);
-    dequantize_w_unit(stream_w_idx[2], cache_cb, stream_w_internal[2], blocks_w, 2);
-    dequantize_w_unit(stream_w_idx[3], cache_cb, stream_w_internal[3], blocks_w, 3);
+    dequantize_w_unit<0>(stream_w_idx[0], cache_cb, stream_w_internal[0], blocks_w);
+    dequantize_w_unit<1>(stream_w_idx[1], cache_cb, stream_w_internal[1], blocks_w);
+    dequantize_w_unit<2>(stream_w_idx[2], cache_cb, stream_w_internal[2], blocks_w);
+    dequantize_w_unit<3>(stream_w_idx[3], cache_cb, stream_w_internal[3], blocks_w);
     
 }
 
@@ -199,7 +207,7 @@ extern "C" {
         const BLOCK_W_PACKED*        input_w2_io_block,
         const BLOCK_W_PACKED*        input_w3_io_block,
         const BLOCK_W_PACKED*        input_w4_io_block,
-        const W_DEQUANTIZED_TYPE*    input_cb,
+        const CB_IO_TYPE*    input_cb,
         const BLOCK_X_IO*            input_x_io_block,
         BLOCK_Y_IO*                  output_y_io_block,
         int n,
@@ -220,7 +228,7 @@ extern "C" {
         #pragma HLS BIND_STORAGE variable=cache_x type=ram_1p impl=lutram
         #pragma HLS ARRAY_PARTITION variable=cache_x cyclic factor=NUM_INST_X 
 
-        W_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W * W_PORTS][GROUP_SIZE];
+        CB_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS][GROUP_SIZE];
         #pragma HLS ARRAY_PARTITION variable=cache_cb dim=1 complete
         #pragma HLS BIND_STORAGE variable=cache_cb type=ram_1p impl=lutram // type=1wnrにした場合HLSがうまいことバンク複製をしてくれなかった．明示的にバンクを作るように実施
 
@@ -228,7 +236,7 @@ extern "C" {
         hls::stream<BLOCK_W_INTERNAL> stream_w_internal[W_PORTS];
         #pragma HLS STREAM variable=stream_w_internal depth=4
 
-        hls::stream<BLOCK_W_QUANTIZED> stream_w_idx[W_PORTS];
+        hls::stream<BLOCK_W_INDEX> stream_w_idx[W_PORTS];
         #pragma HLS STREAM variable=stream_w_idx depth=4
 
         hls::stream<BLOCK_XW> stream_xw[W_PORTS];
