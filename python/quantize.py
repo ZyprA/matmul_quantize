@@ -115,36 +115,6 @@ def tensor_sizes(cfg):
     }
 
 
-def make_vectors(flat: np.ndarray, vector_dim: int) -> tuple[np.ndarray, int]:
-    original_size = int(flat.size)
-    n_vectors = math.ceil(original_size / vector_dim)
-    padded = np.zeros(n_vectors * vector_dim, dtype=np.float32)
-    padded[:original_size] = flat.astype(np.float32, copy=False)
-    return padded.reshape(n_vectors, vector_dim), original_size
-
-
-def quantize_vectors(vectors: np.ndarray, n_clusters: int, use_minibatch: bool):
-    if vectors.shape[0] < n_clusters:
-        raise ValueError(
-            f"サンプル数がクラスタ数より少なすぎます: samples={vectors.shape[0]}, clusters={n_clusters}"
-        )
-
-    cls = MiniBatchKMeans if use_minibatch else KMeans
-    n_init = 1 if use_minibatch else 10
-    km = cls(n_clusters=n_clusters, random_state=42, n_init=n_init, max_iter=300)
-    labels = km.fit_predict(vectors).astype(np.int32)
-    idx_dtype = _idx_dtype(n_clusters)
-    indices = labels.astype(idx_dtype)
-    codebook = km.cluster_centers_.astype(np.float32)
-    return indices, codebook
-
-
-def quantize_matrix_vector(flat: np.ndarray, n_clusters: int, vector_dim: int, use_minibatch: bool):
-    vectors, original_size = make_vectors(flat, vector_dim)
-    indices, codebook = quantize_vectors(vectors, n_clusters, use_minibatch)
-    return indices, codebook, original_size
-
-
 def quantize_matrix_multi_codebook(
     flat: np.ndarray,
     d: int,
@@ -153,7 +123,7 @@ def quantize_matrix_multi_codebook(
     use_minibatch: bool
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    カーネルの構造に合わせた複数コードブックによるベクトル量子化
+    カーネルの構造に合わせた複数コードブックによるベクトル量子化（NumPy化版）
 
     カーネルは ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS 個のコードブックを持つ:
     - 各ポート（0〜W_PORTS-1）ごとに ELEMENTS_BLOCK_W/VECTOR_DIM 個のコードブック
@@ -170,52 +140,50 @@ def quantize_matrix_multi_codebook(
         indices: 量子化インデックス (d * n // VECTOR_DIM,)
         codebooks: コードブック (NUM_CODEBOOKS, n_clusters, VECTOR_DIM)
     """
-    # 行列を (d, n) に reshape
-    matrix = flat.astype(np.float32).reshape(d, n)
-
-    # n を ELEMENTS_BLOCK_W の倍数にパディング
-    n_padded = math.ceil(n / ELEMENTS_BLOCK_W) * ELEMENTS_BLOCK_W
-    if n_padded > n:
-        matrix = np.pad(matrix, ((0, 0), (0, n_padded - n)), mode='constant')
-
     vectors_per_block = ELEMENTS_BLOCK_W // VECTOR_DIM  # = 16
+
+    # --- 行列を (d, blocks_per_row, vectors_per_block, VECTOR_DIM) に reshape ---
+    n_padded = math.ceil(n / ELEMENTS_BLOCK_W) * ELEMENTS_BLOCK_W
     blocks_per_row = n_padded // ELEMENTS_BLOCK_W
 
-    # 各コードブック用のベクトルを収集
-    # codebook_vectors[cb_idx] = そのコードブックに属するベクトルのリスト
-    codebook_vectors = [[] for _ in range(NUM_CODEBOOKS)]
+    matrix = flat.astype(np.float32)
+    if n_padded > n:
+        # 行方向のパディングのみ：一度 (d, n) に戻してから列方向にパディング
+        matrix = np.pad(
+            matrix.reshape(d, n),
+            ((0, 0), (0, n_padded - n)),
+            mode="constant",
+        )
+    # shape: (d, blocks_per_row, vectors_per_block, VECTOR_DIM)
+    matrix = matrix.reshape(d, blocks_per_row, vectors_per_block, VECTOR_DIM)
 
-    # 全ベクトルの位置情報を記録（後でインデックスを割り当てるため）
-    # vector_info[row][block][pos] = (cb_idx, vector)
-    vector_info = []
+    # --- ポートごとの行インデックス（W_PORTS=4 に対応） ---
+    # port_row_indices[port] = そのポートに属する行番号の配列
+    port_row_indices = [np.where(np.arange(d) % W_PORTS == port)[0] for port in range(W_PORTS)]
 
-    for row_idx in range(d):
-        port = row_idx % W_PORTS
-        row_vectors = []
-        for block_idx in range(blocks_per_row):
-            block_start = block_idx * ELEMENTS_BLOCK_W
-            block_data = matrix[row_idx, block_start:block_start + ELEMENTS_BLOCK_W]
-            block_vectors = []
-            for pos in range(vectors_per_block):
-                vec_start = pos * VECTOR_DIM
-                vec = block_data[vec_start:vec_start + VECTOR_DIM]
-                cb_idx = port * vectors_per_block + pos
-                codebook_vectors[cb_idx].append(vec)
-                block_vectors.append((cb_idx, len(codebook_vectors[cb_idx]) - 1))
-            row_vectors.append(block_vectors)
-        vector_info.append(row_vectors)
+    # --- 各コードブックのベクトルを NumPy スライスで一括収集 ---
+    # codebook_vectors[cb_idx]: shape (n_port_rows * blocks_per_row, VECTOR_DIM)
+    codebook_vectors: list[np.ndarray] = [None] * NUM_CODEBOOKS  # type: ignore[list-item]
+    for port in range(W_PORTS):
+        port_rows = port_row_indices[port]
+        # shape: (len(port_rows), blocks_per_row, vectors_per_block, VECTOR_DIM)
+        port_matrix = matrix[port_rows]
+        for pos in range(vectors_per_block):
+            cb_idx = port * vectors_per_block + pos
+            # shape: (len(port_rows) * blocks_per_row, VECTOR_DIM)
+            codebook_vectors[cb_idx] = port_matrix[:, :, pos, :].reshape(-1, VECTOR_DIM)
 
-    # 各コードブックで k-means を実行（並列化）
+    # --- 各コードブックで k-means を並列実行 ---
     cls = MiniBatchKMeans if use_minibatch else KMeans
     n_init = 1 if use_minibatch else 10
 
     def fit_codebook(cb_idx: int):
-        vecs = np.array(codebook_vectors[cb_idx], dtype=np.float32)
+        vecs = codebook_vectors[cb_idx]
         if len(vecs) < n_clusters:
             raise ValueError(
                 f"コードブック {cb_idx} のサンプル数が不足: {len(vecs)} < {n_clusters}"
             )
-        km = cls(n_clusters=n_clusters, random_state=42, n_init=n_init, max_iter=300)
+        km = cls(n_clusters=n_clusters, random_state=42, n_init=n_init, max_iter=1000)
         labels = km.fit_predict(vecs)
         return cb_idx, km.cluster_centers_, labels
 
@@ -224,27 +192,27 @@ def quantize_matrix_multi_codebook(
     )
 
     codebooks = np.zeros((NUM_CODEBOOKS, n_clusters, VECTOR_DIM), dtype=np.float32)
-    codebook_labels = [None] * NUM_CODEBOOKS
+    codebook_labels: list[np.ndarray] = [None] * NUM_CODEBOOKS  # type: ignore[list-item]
     for cb_idx, centers, labels in results:
         codebooks[cb_idx] = centers
         codebook_labels[cb_idx] = labels
 
-    # インデックス配列を構築（元の行列と同じ順序）
+    # --- インデックス配列を NumPy で一括構築 ---
+    # indices_3d[row, block, pos] = そのベクトルの量子化インデックス
     idx_dtype = _idx_dtype(n_clusters)
-    total_vectors = d * n_padded // VECTOR_DIM
-    indices = np.zeros(total_vectors, dtype=idx_dtype)
+    indices_3d = np.zeros((d, blocks_per_row, vectors_per_block), dtype=idx_dtype)
 
-    vec_idx = 0
-    for row_idx in range(d):
-        for block_idx in range(blocks_per_row):
-            for pos in range(vectors_per_block):
-                cb_idx, local_idx = vector_info[row_idx][block_idx][pos]
-                indices[vec_idx] = codebook_labels[cb_idx][local_idx]
-                vec_idx += 1
+    for port in range(W_PORTS):
+        port_rows = port_row_indices[port]
+        n_port_rows = len(port_rows)
+        for pos in range(vectors_per_block):
+            cb_idx = port * vectors_per_block + pos
+            # labels shape: (n_port_rows * blocks_per_row,)
+            labels_2d = codebook_labels[cb_idx].reshape(n_port_rows, blocks_per_row)
+            indices_3d[port_rows, :, pos] = labels_2d
 
-    # パディング部分を除去
-    final_vectors = d * n // VECTOR_DIM
-    indices = indices[:final_vectors]
+    # (d, blocks_per_row, vectors_per_block) → フラット化してパディング分を除去
+    indices = indices_3d.reshape(-1)[: d * n // VECTOR_DIM]
 
     return indices, codebooks
 
