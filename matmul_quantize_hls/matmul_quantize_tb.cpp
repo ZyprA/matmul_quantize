@@ -7,37 +7,55 @@
 #include <limits>
 #include "matmul_quantize_kernel.h"
 
-static void vector_quantize(
-    const std::vector<float>& src,
-    const std::vector<std::array<float, VECTOR_DIM>>& codebook,
+constexpr int NUM_CODEBOOKS = ELEMENTS_BLOCK_W / VECTOR_DIM * W_PORTS;  // 64
+constexpr int INDICES_PER_BLOCK = ELEMENTS_BLOCK_W / VECTOR_DIM;        // 16
+
+// 行rの列cのベクトルが使用するコードブックのインデックスを返す
+static int get_codebook_index(int r, int c, int n) {
+    int port = r % W_PORTS;
+    int block_local_pos = (c / VECTOR_DIM) % INDICES_PER_BLOCK;
+    return port * INDICES_PER_BLOCK + block_local_pos;
+}
+
+// 複数コードブック対応のベクトル量子化
+static void vector_quantize_multi_cb(
+    const std::vector<float>& W_float,
+    const std::vector<std::vector<std::array<float, VECTOR_DIM>>>& codebooks,
+    int d, int n,
     std::vector<int>&         indices,
     std::vector<float>&       dequantized
 ) {
-    const int K = static_cast<int>(codebook.size());
-    const int num_vectors = src.size() / VECTOR_DIM;
+    const int K = GROUP_SIZE;
+    const int num_vectors = d * n / VECTOR_DIM;
     indices.resize(num_vectors);
-    dequantized.resize(src.size());
+    dequantized.resize(d * n);
 
-    for (int i = 0; i < num_vectors; ++i) {
-        int best = 0;
-        float best_d = 0.0f;
-        for (int v = 0; v < VECTOR_DIM; ++v) {
-            float diff = src[i * VECTOR_DIM + v] - codebook[0][v];
-            best_d += diff * diff;
-        }
+    for (int r = 0; r < d; ++r) {
+        for (int c = 0; c < n; c += VECTOR_DIM) {
+            int vec_idx = r * (n / VECTOR_DIM) + c / VECTOR_DIM;
+            int cb_idx = get_codebook_index(r, c, n);
+            const auto& codebook = codebooks[cb_idx];
 
-        for (int k = 1; k < K; ++k) {
-            float d = 0.0f;
+            int best = 0;
+            float best_d = 0.0f;
             for (int v = 0; v < VECTOR_DIM; ++v) {
-                float diff = src[i * VECTOR_DIM + v] - codebook[k][v];
-                d += diff * diff;
+                float diff = W_float[r * n + c + v] - codebook[0][v];
+                best_d += diff * diff;
             }
-            if (d < best_d) { best_d = d; best = k; }
-        }
 
-        indices[i] = best;
-        for (int v = 0; v < VECTOR_DIM; ++v) {
-            dequantized[i * VECTOR_DIM + v] = codebook[best][v];
+            for (int k = 1; k < K; ++k) {
+                float dist = 0.0f;
+                for (int v = 0; v < VECTOR_DIM; ++v) {
+                    float diff = W_float[r * n + c + v] - codebook[k][v];
+                    dist += diff * diff;
+                }
+                if (dist < best_d) { best_d = dist; best = k; }
+            }
+
+            indices[vec_idx] = best;
+            for (int v = 0; v < VECTOR_DIM; ++v) {
+                dequantized[r * n + c + v] = codebook[best][v];
+            }
         }
     }
 }
@@ -97,19 +115,25 @@ int main() {
     float w_min = *std::min_element(W_float.begin(), W_float.end());
     float w_max = *std::max_element(W_float.begin(), W_float.end());
 
-    // 2次元ベクトルのコードブックを生成（各次元を独立に均等分割）
+    // 64個のコードブックを生成（各ポートに16個 × 4ポート）
+    // 各コードブックは2次元ベクトルのGROUP_SIZE個のエントリを持つ
     const int grid_size = static_cast<int>(std::sqrt(GROUP_SIZE));
-    std::vector<std::array<float, VECTOR_DIM>> codebook(GROUP_SIZE);
-    for (int k = 0; k < GROUP_SIZE; ++k) {
-        int idx0 = k % grid_size;
-        int idx1 = k / grid_size;
-        codebook[k][0] = w_min + (w_max - w_min) * (idx0 + 0.5f) / grid_size;
-        codebook[k][1] = w_min + (w_max - w_min) * (idx1 + 0.5f) / grid_size;
+    std::vector<std::vector<std::array<float, VECTOR_DIM>>> codebooks(NUM_CODEBOOKS);
+    for (int cb = 0; cb < NUM_CODEBOOKS; ++cb) {
+        codebooks[cb].resize(GROUP_SIZE);
+        // コードブックごとに少し異なるオフセットを加えて多様性を持たせる
+        float offset = (cb % INDICES_PER_BLOCK) * 0.01f;
+        for (int k = 0; k < GROUP_SIZE; ++k) {
+            int idx0 = k % grid_size;
+            int idx1 = k / grid_size;
+            codebooks[cb][k][0] = w_min + (w_max - w_min) * (idx0 + 0.5f) / grid_size + offset;
+            codebooks[cb][k][1] = w_min + (w_max - w_min) * (idx1 + 0.5f) / grid_size + offset;
+        }
     }
 
     std::vector<int>   W_idx;
     std::vector<float> W_dequant;
-    vector_quantize(W_float, codebook, W_idx, W_dequant);
+    vector_quantize_multi_cb(W_float, codebooks, d, n, W_idx, W_dequant);
 
     std::vector<float> y_quant_ref(d, 0.0f);
     for (int r = 0; r < d; ++r) {
@@ -154,10 +178,13 @@ int main() {
         x_in[i / ELEMENTS_BLOCK_X][i % ELEMENTS_BLOCK_X] = x_raw[i];
 
     // CB_IO_TYPE = hls::vector<float, VECTOR_DIM> の配列としてコードブックを準備
-    std::vector<CB_IO_TYPE> cb(GROUP_SIZE);
-    for (int k = 0; k < GROUP_SIZE; ++k) {
-        for (int v = 0; v < VECTOR_DIM; ++v) {
-            cb[k][v] = codebook[k][v];
+    // カーネルは input_cb[i * GROUP_SIZE + j] の形式で読み込む（i=0..63, j=0..255）
+    std::vector<CB_IO_TYPE> cb(NUM_CODEBOOKS * GROUP_SIZE);
+    for (int i = 0; i < NUM_CODEBOOKS; ++i) {
+        for (int k = 0; k < GROUP_SIZE; ++k) {
+            for (int v = 0; v < VECTOR_DIM; ++v) {
+                cb[i * GROUP_SIZE + k][v] = codebooks[i][k][v];
+            }
         }
     }
 

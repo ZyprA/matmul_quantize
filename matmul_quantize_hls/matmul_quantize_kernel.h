@@ -61,7 +61,7 @@ auto constexpr TEST_D = 640;
 auto constexpr AXI_W_DEPTH = TEST_N * TEST_D / (ELEMENTS_BLOCK_W * W_PORTS);
 auto constexpr AXI_X_DEPTH = TEST_N / ELEMENTS_BLOCK_X;
 auto constexpr AXI_Y_DEPTH = TEST_D / ELEMENTS_BLOCK_Y;
-auto constexpr AXI_CB_DEPTH = GROUP_SIZE;
+auto constexpr AXI_CB_DEPTH = GROUP_SIZE * (ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS);
 
 // カーネルの定義
 extern "C" {

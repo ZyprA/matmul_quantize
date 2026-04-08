@@ -61,16 +61,15 @@ static void load_cb(
     const CB_IO_TYPE* input_cb,
     CB_INTERNAL_TYPE cache_cb[ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS][GROUP_SIZE]
 ) {
-    for (int i = 0; i < GROUP_SIZE; i++) {
-        #pragma HLS PIPELINE II=1
-        CB_IO_TYPE cb_io = input_cb[i];
-        CB_INTERNAL_TYPE cb_internal;
-        for (int j = 0; j < VECTOR_DIM; j++) {
-            cb_internal[j] = (W_INTERNAL_TYPE) cb_io[j];
-        }
-        for (int j = 0; j < ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS; j++) {
-            #pragma HLS UNROLL
-            cache_cb[j][i] = cb_internal;
+    for (int i = 0; i < ELEMENTS_BLOCK_W/VECTOR_DIM * W_PORTS; i++) {
+        for (int j = 0; j < GROUP_SIZE; j++) {
+            #pragma HLS PIPELINE II=1
+            CB_IO_TYPE cb_io = input_cb[GROUP_SIZE * i + j];
+            CB_INTERNAL_TYPE cb_internal;
+            for (int k = 0; k < VECTOR_DIM; k++) {
+                cb_internal[k] = (W_INTERNAL_TYPE) cb_io[k];
+            }
+            cache_cb[i][j] = cb_internal;
         }
     }
 }
