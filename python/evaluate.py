@@ -6,6 +6,16 @@ import struct
 import numpy as np
 
 
+# カーネルと同じ定数
+GROUP_BITS = 8
+GROUP_SIZE = 1 << GROUP_BITS
+VECTOR_DIM = 2
+W_PORTS = 4
+BITWIDTH = 128
+ELEMENTS_BLOCK_W = BITWIDTH // (GROUP_BITS // VECTOR_DIM)  # = 32
+NUM_CODEBOOKS = (ELEMENTS_BLOCK_W // VECTOR_DIM) * W_PORTS  # = 64
+
+
 def read_header(f):
     dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len = struct.unpack("7i", f.read(28))
     shared_weights = vocab_size > 0
@@ -53,17 +63,19 @@ def load_original(path: str):
 
 
 def tensor_sizes(cfg):
+    """各テンソルのサイズと形状 (d, n) を返す"""
     dim = cfg["dim"]
     hidden_dim = cfg["hidden_dim"]
     kv_dim = cfg["kv_dim"]
     return {
-        "wq": dim * dim,
-        "wk": dim * kv_dim,
-        "wv": dim * kv_dim,
-        "wo": dim * dim,
-        "w1": dim * hidden_dim,
-        "w2": hidden_dim * dim,
-        "w3": dim * hidden_dim,
+        # (output_dim, input_dim) = (d, n)
+        "wq": {"size": dim * dim, "d": dim, "n": dim},
+        "wk": {"size": dim * kv_dim, "d": kv_dim, "n": dim},
+        "wv": {"size": dim * kv_dim, "d": kv_dim, "n": dim},
+        "wo": {"size": dim * dim, "d": dim, "n": dim},
+        "w1": {"size": dim * hidden_dim, "d": hidden_dim, "n": dim},
+        "w2": {"size": hidden_dim * dim, "d": dim, "n": hidden_dim},
+        "w3": {"size": dim * hidden_dim, "d": hidden_dim, "n": dim},
     }
 
 
@@ -85,16 +97,8 @@ def load_quantized(path: str, cb_path: str):
         n_clusters = struct.unpack("i", f.read(4))[0]
         vector_dim = struct.unpack("i", f.read(4))[0]
 
-        sizes = {
-            "wq": dim * dim,
-            "wk": dim * kv_dim,
-            "wv": dim * kv_dim,
-            "wo": dim * dim,
-            "w1": dim * hidden_dim,
-            "w2": hidden_dim * dim,
-            "w3": dim * hidden_dim,
-        }
-        vector_counts = {name: math.ceil(sz / vector_dim) for name, sz in sizes.items()}
+        sizes = tensor_sizes(cfg)
+        vector_counts = {name: math.ceil(info["size"] / vector_dim) for name, info in sizes.items()}
 
         np.fromfile(f, dtype=np.float32, count=cfg["vocab_size"] * dim)
         np.fromfile(f, dtype=np.float32, count=n_layers * dim)
@@ -111,27 +115,60 @@ def load_quantized(path: str, cb_path: str):
         cb_cfg = read_header(f)
         cb_n_clusters = struct.unpack("i", f.read(4))[0]
         cb_vector_dim = struct.unpack("i", f.read(4))[0]
+        cb_num_codebooks = struct.unpack("i", f.read(4))[0]
 
         if cb_n_clusters != n_clusters:
             raise ValueError(f"クラスタ数が一致しません: quant={n_clusters}, cb={cb_n_clusters}")
         if cb_vector_dim != vector_dim:
             raise ValueError(f"vector_dim が一致しません: quant={vector_dim}, cb={cb_vector_dim}")
+        if cb_num_codebooks != NUM_CODEBOOKS:
+            raise ValueError(f"コードブック数が一致しません: expected={NUM_CODEBOOKS}, cb={cb_num_codebooks}")
         if cb_cfg["dim"] != cfg["dim"] or cb_cfg["hidden_dim"] != cfg["hidden_dim"] or cb_cfg["n_layers"] != cfg["n_layers"]:
             raise ValueError("ヘッダ情報が一致しません")
 
+        # コードブック読み込み: [name][layer][cb_idx] -> (n_clusters, vector_dim)
         codebooks = {name: [] for name in sizes}
         for name in sizes:
             for _ in range(n_layers):
-                codebooks[name].append(np.fromfile(f, dtype=np.float32, count=n_clusters * vector_dim).reshape(n_clusters, vector_dim))
+                layer_cbs = np.zeros((NUM_CODEBOOKS, n_clusters, vector_dim), dtype=np.float32)
+                for cb_idx in range(NUM_CODEBOOKS):
+                    for cluster_idx in range(n_clusters):
+                        layer_cbs[cb_idx, cluster_idx] = np.fromfile(f, dtype=np.float32, count=vector_dim)
+                codebooks[name].append(layer_cbs)
+
+    # 複数コードブックを使った dequantize
+    vectors_per_block = ELEMENTS_BLOCK_W // vector_dim  # = 16
 
     dequant = {}
-    for name, sz in sizes.items():
-        layers = []
+    for name, info in sizes.items():
+        sz = info["size"]
+        d = info["d"]
+        n = info["n"]
         vec_count = vector_counts[name]
+
+        n_padded = math.ceil(n / ELEMENTS_BLOCK_W) * ELEMENTS_BLOCK_W
+        blocks_per_row = n_padded // ELEMENTS_BLOCK_W
+
+        layers = []
         for layer in range(n_layers):
-            idx = raw_idx[name][layer * vec_count : (layer + 1) * vec_count]
-            layer_vectors = codebooks[name][layer][idx.astype(np.int32)]
-            flat = layer_vectors.reshape(-1)[:sz]
+            idx = raw_idx[name][layer * vec_count : (layer + 1) * vec_count].astype(np.int32)
+            layer_cbs = codebooks[name][layer]
+
+            # 行列を復元
+            matrix = np.zeros((d, n_padded), dtype=np.float32)
+            vec_idx = 0
+            for row_idx in range(d):
+                port = row_idx % W_PORTS
+                for block_idx in range(blocks_per_row):
+                    for pos in range(vectors_per_block):
+                        if vec_idx < len(idx):
+                            cb_idx = port * vectors_per_block + pos
+                            cluster_idx = idx[vec_idx]
+                            col_start = block_idx * ELEMENTS_BLOCK_W + pos * vector_dim
+                            matrix[row_idx, col_start:col_start + vector_dim] = layer_cbs[cb_idx, cluster_idx]
+                        vec_idx += 1
+
+            flat = matrix[:, :n].reshape(-1)
             layers.append(flat)
         dequant[name] = np.concatenate(layers)
 
@@ -156,14 +193,15 @@ def evaluate(orig_path: str, quant_path: str, cb_path: str):
     bits = int(np.log2(n_clusters))
     total_stats = {name: [] for name in sizes}
 
-    print(f"{'=' * 72}")
-    print(f"  ベクトル量子化評価   クラスタ数={n_clusters} ({bits}bit)  ベクトル長={vector_dim}  レイヤー数={n_layers}")
-    print(f"{'=' * 72}")
+    print(f"{'=' * 80}")
+    print(f"  ベクトル量子化評価   クラスタ数={n_clusters} ({bits}bit)  ベクトル長={vector_dim}  コードブック数={NUM_CODEBOOKS}")
+    print(f"{'=' * 80}")
     print(f"{'Layer':<6} {'Name':<5} {'MSE':>12} {'RMSE':>10} {'PSNR(dB)':>10} {'Cosine':>8}")
-    print(f"{'-' * 72}")
+    print(f"{'-' * 80}")
 
     for layer in range(n_layers):
-        for name, sz in sizes.items():
+        for name, info in sizes.items():
+            sz = info["size"]
             o = orig[name][layer * sz : (layer + 1) * sz]
             dq = dequant[name][layer * sz : (layer + 1) * sz]
             mse, rmse, psnr, cos = metrics(o, dq)
@@ -171,11 +209,11 @@ def evaluate(orig_path: str, quant_path: str, cb_path: str):
             print(f"{layer:<6} {name.upper():<5} {mse:>12.8f} {rmse:>10.6f} {psnr:>10.2f} {cos:>8.6f}")
         print()
 
-    print(f"{'=' * 72}")
+    print(f"{'=' * 80}")
     print(f"  重み行列別の平均")
-    print(f"{'-' * 72}")
+    print(f"{'-' * 80}")
     print(f"{'Name':<5} {'MSE':>12} {'RMSE':>10} {'PSNR(dB)':>10} {'Cosine':>8}")
-    print(f"{'-' * 72}")
+    print(f"{'-' * 80}")
 
     for name, stats in total_stats.items():
         m = np.array(stats).mean(axis=0)
@@ -184,14 +222,14 @@ def evaluate(orig_path: str, quant_path: str, cb_path: str):
     all_stats = np.array([s for stats in total_stats.values() for s in stats])
     m = all_stats.mean(axis=0)
     print(f"\n{'総合平均':<5} {m[0]:>12.8f} {m[1]:>10.6f} {m[2]:>10.2f} {m[3]:>8.6f}")
-    print(f"{'=' * 72}")
+    print(f"{'=' * 80}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ベクトル量子化精度の評価")
+    parser = argparse.ArgumentParser(description="ベクトル量子化精度の評価（複数コードブック対応）")
     parser.add_argument("bin_path", help="元モデルバイナリ (例: stories15M.bin)")
-    parser.add_argument("bits", type=int, help="量子化ビット数")
-    parser.add_argument("--vector-dim", type=int, default=8, help="量子化ベクトル長")
+    parser.add_argument("bits", type=int, nargs="?", default=GROUP_BITS, help=f"量子化ビット数（デフォルト: {GROUP_BITS}）")
+    parser.add_argument("--vector-dim", type=int, default=VECTOR_DIM, help=f"量子化ベクトル長（デフォルト: {VECTOR_DIM}）")
     parser.add_argument("--quant", default=None, help="量子化 bin の直接パス指定")
     parser.add_argument("--cb", default=None, help="コードブック bin の直接パス指定")
     args = parser.parse_args()
