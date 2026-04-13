@@ -4,6 +4,7 @@ import os
 import struct
 import time
 
+import matplotlib.pyplot as plt
 import numpy as np
 from joblib import Parallel, delayed
 from sklearn.cluster import KMeans, MiniBatchKMeans
@@ -120,8 +121,9 @@ def quantize_matrix_multi_codebook(
     d: int,
     n: int,
     n_clusters: int,
-    use_minibatch: bool
-) -> tuple[np.ndarray, np.ndarray]:
+    use_minibatch: bool,
+    return_vectors: bool = False
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
     """
     カーネルの構造に合わせた複数コードブックによるベクトル量子化（NumPy化版）
 
@@ -135,10 +137,12 @@ def quantize_matrix_multi_codebook(
         n: 入力次元（列数）
         n_clusters: クラスタ数（GROUP_SIZE）
         use_minibatch: MiniBatchKMeans を使うか
+        return_vectors: プロット用にベクトルも返すか
 
     Returns:
         indices: 量子化インデックス (d * n // VECTOR_DIM,)
         codebooks: コードブック (NUM_CODEBOOKS, n_clusters, VECTOR_DIM)
+        codebook_vectors: (return_vectors=True の場合) 各コードブックのベクトル
     """
     vectors_per_block = ELEMENTS_BLOCK_W // VECTOR_DIM  # = 16
 
@@ -214,10 +218,69 @@ def quantize_matrix_multi_codebook(
     # (d, blocks_per_row, vectors_per_block) → フラット化してパディング分を除去
     indices = indices_3d.reshape(-1)[: d * n // VECTOR_DIM]
 
+    if return_vectors:
+        return indices, codebooks, codebook_vectors
     return indices, codebooks
 
 
-def run(bin_path: str, bits: int, vector_dim: int, use_minibatch: bool):
+def plot_codebooks(
+    codebook_vectors: list[np.ndarray],
+    codebooks: np.ndarray,
+    name: str,
+    layer: int,
+    out_dir: str,
+    max_samples: int = 1000
+):
+    """
+    各コードブックのベクトルとセントロイドを2次元プロット
+
+    Args:
+        codebook_vectors: 各コードブックのベクトル (NUM_CODEBOOKS 個)
+        codebooks: セントロイド (NUM_CODEBOOKS, n_clusters, VECTOR_DIM)
+        name: テンソル名
+        layer: レイヤー番号
+        out_dir: 出力ディレクトリ
+        max_samples: プロットする最大サンプル数（描画高速化のため）
+    """
+    vectors_per_block = ELEMENTS_BLOCK_W // VECTOR_DIM  # = 16
+
+    fig, axes = plt.subplots(W_PORTS, vectors_per_block, figsize=(32, 8))
+    fig.suptitle(f"{name.upper()} Layer {layer} - Codebook Visualization (64 codebooks)", fontsize=14)
+
+    for port in range(W_PORTS):
+        for pos in range(vectors_per_block):
+            cb_idx = port * vectors_per_block + pos
+            ax = axes[port, pos]
+
+            vecs = codebook_vectors[cb_idx]
+            centers = codebooks[cb_idx]
+
+            # サンプル数を制限（描画高速化）
+            if len(vecs) > max_samples:
+                rng = np.random.default_rng(42)
+                idx = rng.choice(len(vecs), max_samples, replace=False)
+                vecs_plot = vecs[idx]
+            else:
+                vecs_plot = vecs
+
+            # 元のベクトルを散布図でプロット（薄い色）
+            ax.scatter(vecs_plot[:, 0], vecs_plot[:, 1], s=1, alpha=0.3, c='blue')
+
+            # セントロイドをプロット（濃い色、大きいマーカー）
+            ax.scatter(centers[:, 0], centers[:, 1], s=20, alpha=0.8, c='red', marker='x')
+
+            ax.set_title(f"cb{cb_idx}", fontsize=6)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+    plt.tight_layout()
+    out_path = os.path.join(out_dir, f"{name}_layer{layer}_codebooks.png")
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"    プロット保存: {out_path}")
+
+
+def run(bin_path: str, bits: int, vector_dim: int, use_minibatch: bool, plot: bool = False):
     n_clusters = 1 << bits
 
     if bits != GROUP_BITS:
@@ -251,7 +314,17 @@ def run(bin_path: str, bits: int, vector_dim: int, use_minibatch: bool):
             d = info["d"]
             n = info["n"]
             flat = tensors[name][layer * sz : (layer + 1) * sz]
-            indices, cbs = quantize_matrix_multi_codebook(flat, d, n, n_clusters, use_minibatch)
+
+            if plot:
+                indices, cbs, cb_vectors = quantize_matrix_multi_codebook(
+                    flat, d, n, n_clusters, use_minibatch, return_vectors=True
+                )
+                plot_codebooks(cb_vectors, cbs, name, layer, out_dir)
+            else:
+                indices, cbs = quantize_matrix_multi_codebook(
+                    flat, d, n, n_clusters, use_minibatch
+                )
+
             quantized_indices[name].append(indices)
             codebooks[name].append(cbs)
         print(f"  Layer {layer + 1}/{n_layers} 完了  ({time.time() - t0:.1f}s)")
@@ -344,6 +417,7 @@ if __name__ == "__main__":
     parser.add_argument("bits", type=int, nargs="?", default=GROUP_BITS, help=f"量子化ビット数（デフォルト: {GROUP_BITS}）")
     parser.add_argument("--vector-dim", type=int, default=VECTOR_DIM, help=f"量子化するベクトル長（デフォルト: {VECTOR_DIM}）")
     parser.add_argument("--minibatch", action="store_true", help="MiniBatchKMeans を使う")
+    parser.add_argument("--plot", action="store_true", help="コードブックを2次元プロットで可視化")
     args = parser.parse_args()
 
-    run(args.bin_path, args.bits, args.vector_dim, args.minibatch)
+    run(args.bin_path, args.bits, args.vector_dim, args.minibatch, args.plot)

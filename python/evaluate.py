@@ -3,13 +3,14 @@ import math
 import os
 import struct
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 
 # カーネルと同じ定数
 GROUP_BITS = 8
 GROUP_SIZE = 1 << GROUP_BITS
-VECTOR_DIM = 4
+VECTOR_DIM = 2
 W_PORTS = 4
 BITWIDTH = 128
 ELEMENTS_BLOCK_W = BITWIDTH // (GROUP_BITS // VECTOR_DIM)  # = 32
@@ -172,7 +173,7 @@ def load_quantized(path: str, cb_path: str):
             layers.append(flat)
         dequant[name] = np.concatenate(layers)
 
-    return cfg, n_clusters, vector_dim, dequant, sizes
+    return cfg, n_clusters, vector_dim, dequant, sizes, codebooks
 
 
 def metrics(orig: np.ndarray, dq: np.ndarray):
@@ -185,9 +186,42 @@ def metrics(orig: np.ndarray, dq: np.ndarray):
     return mse, rmse, psnr, cos
 
 
-def evaluate(orig_path: str, quant_path: str, cb_path: str):
+def plot_codebooks_2d(codebooks: dict, n_clusters: int, output_dir: str, layer: int = 0):
+    """コードブックの2次元ベクトルをプロット"""
+    names = list(codebooks.keys())
+    n_plots = len(names)
+    cols = 4
+    rows = (n_plots + cols - 1) // cols
+
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 4 * rows))
+    axes = axes.flatten() if n_plots > 1 else [axes]
+
+    colors = plt.cm.tab20(np.linspace(0, 1, NUM_CODEBOOKS))
+
+    for ax, name in zip(axes, names):
+        layer_cbs = codebooks[name][layer]  # (NUM_CODEBOOKS, n_clusters, vector_dim)
+        for cb_idx in range(NUM_CODEBOOKS):
+            cb = layer_cbs[cb_idx]  # (n_clusters, 2)
+            ax.scatter(cb[:, 0], cb[:, 1], s=10, alpha=0.7, c=[colors[cb_idx]], label=f"CB{cb_idx}" if cb_idx < 8 else None)
+        ax.set_title(f"{name.upper()} (layer {layer})")
+        ax.set_xlabel("dim 0")
+        ax.set_ylabel("dim 1")
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect("equal", adjustable="box")
+
+    for ax in axes[n_plots:]:
+        ax.set_visible(False)
+
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, f"codebook_layer{layer}.png")
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
+    print(f"[PLOT] コードブック可視化を保存: {plot_path}")
+
+
+def evaluate(orig_path: str, quant_path: str, cb_path: str, output_dir: str, plot_layers: list = None):
     cfg_o, orig = load_original(orig_path)
-    cfg_q, n_clusters, vector_dim, dequant, sizes = load_quantized(quant_path, cb_path)
+    cfg_q, n_clusters, vector_dim, dequant, sizes, codebooks = load_quantized(quant_path, cb_path)
 
     n_layers = cfg_o["n_layers"]
     bits = int(np.log2(n_clusters))
@@ -224,6 +258,13 @@ def evaluate(orig_path: str, quant_path: str, cb_path: str):
     print(f"\n{'総合平均':<5} {m[0]:>12.8f} {m[1]:>10.6f} {m[2]:>10.2f} {m[3]:>8.6f}")
     print(f"{'=' * 80}")
 
+    # 2次元プロット
+    if vector_dim == 2:
+        layers_to_plot = plot_layers if plot_layers else [0]
+        for layer in layers_to_plot:
+            if layer < n_layers:
+                plot_codebooks_2d(codebooks, n_clusters, output_dir, layer)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ベクトル量子化精度の評価（複数コードブック対応）")
@@ -232,6 +273,7 @@ if __name__ == "__main__":
     parser.add_argument("--vector-dim", type=int, default=VECTOR_DIM, help=f"量子化ベクトル長（デフォルト: {VECTOR_DIM}）")
     parser.add_argument("--quant", default=None, help="量子化 bin の直接パス指定")
     parser.add_argument("--cb", default=None, help="コードブック bin の直接パス指定")
+    parser.add_argument("--plot-layers", type=str, default="0", help="プロットするレイヤー番号（カンマ区切り、例: 0,1,2）")
     args = parser.parse_args()
 
     stem = os.path.splitext(os.path.basename(args.bin_path))[0]
@@ -244,4 +286,5 @@ if __name__ == "__main__":
             print(f"[ERROR] ファイルが見つかりません: {p}")
             raise SystemExit(1)
 
-    evaluate(args.bin_path, quant_path, cb_path)
+    plot_layers = [int(x.strip()) for x in args.plot_layers.split(",")]
+    evaluate(args.bin_path, quant_path, cb_path, quant_dir, plot_layers)
